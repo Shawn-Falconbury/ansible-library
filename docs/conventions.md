@@ -12,6 +12,15 @@ never be mistaken for a working value.
 | `CHANGEME_` prefix | Must be set before first run; no safe default exists | `CHANGEME_set_in_vault` |
 | `{{ vault_* }}` | A secret, referenced never inlined | `{{ vault_ios_password }}` |
 | `.example` suffix | Copy the file and fill it in | `vars/mail.yml.example` |
+| RFC 7042 MAC range | A MAC you must replace | `00:00:5e:00:53:af` |
+
+
+The same applies to MAC addresses, and it is easier to get wrong because
+there is no familiar 'private MAC' intuition to fall back on. RFC 7042
+section 2.1.2 reserves `00-00-5E-00-53-00` through `00-00-5E-00-53-FF` for
+documentation. Anything else is a real IEEE-assigned OUI: `00:1a:2b` looks
+like a placeholder and identifies an actual vendor. The leak checker
+allowlists the documentation range and flags everything else.
 
 Never use a plausible-looking address as a placeholder. `10.0.0.1` reads as <!-- leak-check: allow -->
 real, survives review, and teaches readers that private ranges are acceptable

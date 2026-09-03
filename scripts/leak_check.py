@@ -115,6 +115,17 @@ ALLOWED_DOMAIN_SUFFIXES = (
 # documentation links. These are not environment data -- they are the same for
 # everyone. Keep this list short and exact; it is an allowlist, not a
 # convenience hatch for "domains that felt fine".
+# RFC 7042 section 2.1.2 reserves 00-00-5E-00-53-00 through
+# 00-00-5E-00-53-FF for documentation. It is the MAC equivalent of the
+# RFC 5737 address ranges, and the same rule applies: a documentation
+# value is publishable, anything else is a finding. Matched
+# case-insensitively and across all three notations.
+ALLOWED_MAC_PREFIXES = (
+    "00:00:5e:00:53:",
+    "00-00-5e-00-53-",
+    "0000.5e00.53",
+)
+
 ALLOWED_EXACT_DOMAINS = {
     "github.com",
     "raw.githubusercontent.com",
@@ -167,7 +178,11 @@ RE_MAC = re.compile(
 RE_DOMAIN = re.compile(
     r"(?<![\w.@-])(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+"
     r"(?:com|net|org|io|local|lan|internal|corp|gov|edu|mil|us|co|dev|app)"
-    r"(?![\w-])"
+    # A dot in the trailing lookahead is load-bearing. Without it,
+    # "sw-a-01.internal.corp.example" matched only as far as ".corp" and
+    # was reported as a leak, even though the full name ends in the
+    # allowlisted .example and is therefore fine.
+    r"(?![\w.-])"
 )
 
 RE_EMAIL = re.compile(
@@ -185,11 +200,16 @@ RE_SECRETISH = re.compile(  # leak-check: allow
     r"""(?ix)
     (?<![\w.-])
     (?P<key>
-        [A-Za-z0-9_.-]*
+        # No hyphen in the key character class, deliberately. Variable
+        # names in YAML and INI use underscores; hyphens appear in prose.
+        # With '-' included, the comment "the one legitimate pass-through:
+        # there is no domain" parsed as key='pass-through', value='there'
+        # and was reported as a literal secret.
+        [A-Za-z0-9_.]*
         (?: password | passwd | passphrase | secret | api[_-]?key |
             token | community | authkey | privkey |
             pass(?![A-Za-z]) )
-        [A-Za-z0-9_.-]*
+        [A-Za-z0-9_.]*
     )
     \s* [:=] \s*
     (?P<val>["']?[^\s"'#]{4,}["']?)
@@ -259,6 +279,11 @@ def ipv6_is_allowed(text: str) -> bool:
     return any(addr in net for net in ALLOWED_V6_NETWORKS)
 
 
+def mac_is_allowed(text: str) -> bool:
+    lowered = text.lower()
+    return lowered.startswith(ALLOWED_MAC_PREFIXES)
+
+
 def domain_is_allowed(text: str) -> bool:
     lowered = text.lower().rstrip(".")
     if lowered in ALLOWED_EXACT_DOMAINS:
@@ -311,7 +336,8 @@ def scan_line(path: Path, lineno: int, line: str) -> list[Finding]:
             add("ipv6-address", match.group(0))
 
     for match in RE_MAC.finditer(line):
-        add("mac-address", match.group(0))
+        if not mac_is_allowed(match.group(0)):
+            add("mac-address", match.group(0))
 
     for match in RE_EMAIL.finditer(line):
         domain = match.group(0).split("@", 1)[1]

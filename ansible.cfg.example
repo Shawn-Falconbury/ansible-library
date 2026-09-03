@@ -3,6 +3,20 @@
 [defaults]
 inventory = ./inventory/hosts.yml
 roles_path = ./roles
+
+# filter_plugins MUST be declared explicitly.
+#
+# Ansible auto-discovers a filter_plugins/ directory adjacent to the
+# PLAYBOOK, not at the project root. Every playbook here lives in a
+# subdirectory (playbooks/network/, playbooks/linux/, ...), so the
+# repository-root filter_plugins/ is never found by that mechanism.
+#
+# Without this line the failure is a template error reading
+# "No filter named 'mask_ip'", which looks like a typo in the template
+# rather than a search-path problem. Worse, a report that fails to render
+# is the GOOD outcome here -- the filters exist to keep live addresses out
+# of distributed reports.
+filter_plugins = ./filter_plugins
 collections_path = ./collections
 host_key_checking = True
 retry_files_enabled = False

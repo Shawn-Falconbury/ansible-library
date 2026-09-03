@@ -18,3 +18,15 @@ bypass_checks: true
 listen_port: 8080
 passive_mode: false
 ansible_password: "{{ vault_ansible_password }}"
+
+# RFC 7042 documentation MAC range -- the MAC equivalent of RFC 5737.
+doc_mac_colon: 00:00:5e:00:53:af
+doc_mac_hyphen: 00-00-5e-00-53-af
+doc_mac_cisco: 0000.5e00.53af
+doc_mac_upper: 00:00:5E:00:53:AF
+# Prose containing 'pass-through' must not parse as key=pass-through.
+# The one legitimate pass-through: there is no domain to remove.
+# A dotted name whose interior label looks like a TLD but which ends in an
+# allowlisted suffix must not be truncated and flagged.
+long_name: sw-a-01.internal.corp.example
+another_name: host.lan.local.example

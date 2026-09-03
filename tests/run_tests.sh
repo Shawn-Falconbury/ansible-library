@@ -13,6 +13,11 @@ cd "${REPO_ROOT}" || exit 2
 
 FAILED=0
 
+echo "== filter plugin unit tests ==================================="
+# No Ansible needed. Runs first because it is the fastest check and the
+# one guarding the code most likely to leak data if it breaks.
+python3 -m unittest discover -s tests -p 'test_*.py' || FAILED=1
+
 echo "== leak check =================================================="
 bash tests/test_leak_check.sh || FAILED=1
 

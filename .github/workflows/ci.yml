@@ -38,6 +38,24 @@ jobs:
         # clean verdict on the repository means anything.
         run: bash tests/test_leak_check.sh
 
+  unit:
+    name: unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Filter plugin unit tests
+        # Deliberately its own job with no Ansible installed. The masking
+        # filters degrade to a plain Exception subclass when
+        # ansible.errors is unavailable, and this job proves that path
+        # keeps working -- so the highest-risk logic in the repo stays
+        # testable on any machine with python3 and nothing else.
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
   lint:
     name: lint
     runs-on: ubuntu-latest
