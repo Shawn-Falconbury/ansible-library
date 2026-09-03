@@ -157,6 +157,11 @@
 - name: Build and emit the reachability report
   hosts: ios_devices:linux_hosts
   gather_facts: false
+  # Declared, not assumed. run_once picks a single host to execute on and
+  # relies on ordering that the `free` strategy does not guarantee. linear
+  # is the default, but stating it means a future change to the default,
+  # or an inherited strategy, cannot silently alter behaviour here.
+  strategy: linear
   # NOTE: run_once and delegate_to are TASK keywords, not play keywords.
   # Placing them here parses as YAML and then fails at execution with
   # "'delegate_to' is not a valid attribute for a Play". They are applied per
@@ -207,7 +212,11 @@
       run_once: true
       delegate_to: localhost
       ansible.builtin.template:
-        src: ../../templates/reachability_report.txt.j2
+        # Bare filename on purpose. Ansible's template lookup searches a
+        # templates/ directory adjacent to the playbook, so no path is
+        # needed. A relative ../.. path works but breaks the moment the
+        # playbook moves, and ansible-lint flags it.
+        src: reachability_report.txt.j2
         dest: "{{ reachability_report_path }}"
         mode: "0640"
 

@@ -3,7 +3,41 @@ exclude_paths:
   - collections/
   - tests/fixtures/
   - tests/negative/
+
 skip_list:
+  # ansible-lint names the task by its `name:` field; this rule adds nothing
+  # over reading the task.
   - name[template]
+
+  # fqcn[canonical] insists `cisco.ios.ios_facts` should be written as
+  # `cisco.ios.ios`. That is wrong -- `cisco.ios.ios` is not a module.
+  # Verified against the installed collection:
+  #
+  #     ansible-doc -l cisco.ios | awk '{print $1}' | grep -x 'cisco.ios.ios'
+  #
+  # returns nothing. The rule is resolving an action-group redirect (cisco.ios
+  # defines an action group named `ios` for network_cli module defaults) and
+  # mistaking it for the canonical module name. Following its advice would
+  # break every playbook here.
+  #
+  # Scoped to the canonical sub-rule, so genuine non-FQCN usage such as a bare
+  # `ping:` or `shell:` is still caught.
+  - fqcn[canonical]
+
+  # run-once[task] fires on EVERY task-level run_once. Read the rule source:
+  # matchtask() checks only whether run_once is present and never inspects the
+  # play's strategy, so the warning it emits -- "may behave differently if
+  # strategy is set to free" -- cannot be answered by setting a strategy.
+  #
+  # The underlying hazard is real, so it is addressed structurally instead:
+  # every play in this repo that uses run_once declares `strategy: linear`
+  # explicitly. Grep for it. That is a stronger guarantee than the rule is
+  # asking for, since it holds even if the global default changes.
+  #
+  # run-once[play] is deliberately NOT skipped. That sub-rule catches an
+  # actual `strategy: free` on a play using run_once, which is the genuine
+  # failure mode and must keep failing the build.
+  - run-once[task]
+
 warn_list:
   - experimental

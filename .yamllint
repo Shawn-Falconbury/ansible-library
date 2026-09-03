@@ -1,15 +1,36 @@
 ---
+# The three overrides below are not stylistic preferences -- ansible-lint
+# refuses to run in fix mode against a yamllint config that disagrees with it,
+# and emits a warning in CI logs on every run. Matching its expectations keeps
+# the logs readable and fix mode available.
 extends: default
+
 rules:
   line-length:
     max: 120
     level: warning
+
   truthy:
     allowed-values: ["true", "false"]
+
+  # Required false by ansible-lint. Comment indentation is not worth failing a
+  # build over, and this repo indents comments to match the block they explain.
+  comments-indentation: false
+
   comments:
     min-spaces-from-content: 1
+
   braces:
     max-spaces-inside: 1
+
+  # Both required true by ansible-lint, and correct on their own merits: a file
+  # mode written as 0644 without quotes is parsed as decimal 644 by YAML, not
+  # octal. Ansible then applies a mode nobody intended. Quoting is the fix, and
+  # these rules make the unquoted form an error rather than a surprise.
+  octal-values:
+    forbid-implicit-octal: true
+    forbid-explicit-octal: true
+
 ignore: |
   collections/
   tests/fixtures/

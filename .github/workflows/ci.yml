@@ -104,5 +104,9 @@ jobs:
             echo "::group::$pb"
             ansible-playbook --syntax-check "$pb" || rc=1
             echo "::endgroup::"
-          done < <(find playbooks -name '*.yml' -type f | sort)
+          # -path exclusion is load-bearing. Files under tasks/ are task
+          # lists, not playbooks; --syntax-check rejects them outright.
+          # An unfiltered find here failed the first CI run on this repo.
+          done < <(find playbooks -name '*.yml' -type f \
+                     -not -path 'playbooks/*/tasks/*' | sort)
           exit $rc

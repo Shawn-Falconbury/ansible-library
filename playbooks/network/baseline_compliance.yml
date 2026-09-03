@@ -80,6 +80,9 @@
 - name: Audit devices against the baseline
   hosts: ios_devices
   gather_facts: false
+  # See the note on the reporting play below: run_once depends on linear
+  # ordering, so the strategy is stated rather than inherited.
+  strategy: linear
 
   vars_files:
     - ../../vars/baseline.yml
@@ -110,6 +113,9 @@
 - name: Render the compliance report
   hosts: ios_devices
   gather_facts: false
+  # Declared, not assumed. run_once picks a single host to execute on and
+  # relies on ordering the `free` strategy does not guarantee.
+  strategy: linear
   # NOTE: run_once and delegate_to are TASK keywords. At play level they parse
   # as valid YAML and then fail at execution time. They are applied per task.
   #
@@ -149,7 +155,8 @@
       run_once: true
       delegate_to: localhost
       ansible.builtin.template:
-        src: ../../templates/baseline_report.txt.j2
+        # Bare filename: resolved from playbooks/network/templates/.
+        src: baseline_report.txt.j2
         dest: "{{ baseline_report_path }}"
         mode: "0640"
 

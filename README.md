@@ -46,11 +46,12 @@ inventory/       Example inventory and group_vars (.example only)
 vars/            Example variable files (.example only)
 playbooks/
   network/       Cisco IOS / IOS-XE
+    tasks/       Task files: collection and evaluation, included not run
+    templates/   Jinja2 report templates for these playbooks
   linux/         Linux hosts over SSH
   tls/           Certificate distribution
   reporting/     Health reporting and notification
 roles/           Reusable roles
-templates/       Jinja2 report templates
 scripts/         Helper scripts, including the leak checker
 tests/           Test harness, fixtures, and negative cases
 ```
@@ -75,6 +76,12 @@ Filled-in copies are gitignored. Only `.example` files are tracked, so a real
 inventory cannot be committed by forgetting to add it to `.gitignore`.
 
 Verified against ansible-core 2.16 and 2.17.
+
+Templates live in a `templates/` directory beside the playbooks that use
+them, not in one at the repository root. Ansible's template lookup searches
+there automatically, so playbooks reference a bare filename and stay
+correct if the directory moves. A root-level `templates/` forces
+`src: ../../templates/x.j2`, which breaks on any relocation.
 
 ## The rule this repository runs on
 
