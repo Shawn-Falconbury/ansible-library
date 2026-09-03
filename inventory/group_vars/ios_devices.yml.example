@@ -1,0 +1,24 @@
+---
+# Copy to inventory/group_vars/ios_devices.yml.
+
+ansible_connection: ansible.netcommon.network_cli
+ansible_network_os: cisco.ios.ios
+
+ansible_user: "{{ vault_ios_user }}"
+ansible_password: "{{ vault_ios_password }}"
+ansible_become: true
+ansible_become_method: ansible.netcommon.enable
+ansible_become_password: "{{ vault_ios_enable_password }}"
+
+ansible_command_timeout: 60
+ansible_connect_timeout: 60
+
+# NOTE ON PRECEDENCE
+# ansible_connection defined here outranks a play-level `connection:` keyword.
+# A play that sets `connection: local` against these hosts will still use
+# network_cli. To run a task on the control node, use delegate_to: localhost.
+#
+# The same applies to ansible_become. Setting `ansible_become: false` here
+# silently drops privilege for every play against this group, including plays
+# that set become: true at play level. Verify with:
+#   ansible -m debug -a 'var=ansible_become' ios_devices

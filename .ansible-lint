@@ -1,0 +1,9 @@
+---
+exclude_paths:
+  - collections/
+  - tests/fixtures/
+  - tests/negative/
+skip_list:
+  - name[template]
+warn_list:
+  - experimental

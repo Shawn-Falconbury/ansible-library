@@ -1,0 +1,108 @@
+---
+name: ci
+
+# The leak check runs first and independently. If anything resembling real
+# environment data reaches this repository, that job fails and the rest is
+# irrelevant -- a public repo with a leaked address in it is a problem whether
+# or not the YAML lints cleanly.
+
+# Quoted deliberately. Bare `on:` is parsed as boolean true under
+# YAML 1.1, which yamllint flags as a truthy violation. GitHub
+# Actions treats the quoted form identically.
+"on":
+  push:
+    branches: ["**"]
+  pull_request:
+  schedule:
+    # Weekly re-scan. Catches patterns added to the checker after content was
+    # already merged.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  leak-check:
+    name: leak check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify the checker itself, then scan the tree
+        # test_leak_check.sh asserts the negative path before the positive
+        # one: the checker must reject a file of planted leaks before its
+        # clean verdict on the repository means anything.
+        run: bash tests/test_leak_check.sh
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install "ansible-core>=2.16,<2.18" ansible-lint yamllint
+
+      - name: yamllint
+        run: yamllint .
+
+      - name: ansible-lint
+        run: ansible-lint
+
+  syntax:
+    name: syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install "ansible-core>=2.16,<2.18"
+
+      - name: Stage example configuration
+        # The repo ships only .example files so that no runnable config with
+        # site values can be committed. CI materialises them to prove the
+        # examples are themselves valid, not just illustrative.
+        run: |
+          cp ansible.cfg.example ansible.cfg
+          cp inventory/hosts.yml.example inventory/hosts.yml
+          for f in inventory/group_vars/*.yml.example; do
+            cp "$f" "${f%.example}"
+          done
+          for f in vars/*.yml.example; do
+            cp "$f" "${f%.example}"
+          done
+
+      - name: Fixture-driven logic tests
+        # These exercise the evaluation layer against recorded fixtures on
+        # localhost -- no device, no credentials. This is what makes the
+        # TimeTicks guard testable in CI at all.
+        run: ansible-playbook -i localhost, tests/test_baseline_logic.yml
+
+      - name: Install pinned collections
+        run: ansible-galaxy collection install -r requirements.yml
+
+      - name: Syntax-check every playbook
+        run: |
+          rc=0
+          while IFS= read -r pb; do
+            echo "::group::$pb"
+            ansible-playbook --syntax-check "$pb" || rc=1
+            echo "::endgroup::"
+          done < <(find playbooks -name '*.yml' -type f | sort)
+          exit $rc

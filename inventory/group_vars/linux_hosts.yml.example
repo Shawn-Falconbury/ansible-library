@@ -1,0 +1,12 @@
+---
+# Copy to inventory/group_vars/linux_hosts.yml.
+
+ansible_connection: ssh
+ansible_user: "{{ vault_linux_user }}"
+ansible_become: true
+ansible_become_method: sudo
+
+# Point at the interpreter you actually intend to use. If ansible-core runs
+# from a virtualenv on the control node, that affects the CONTROL node only --
+# this setting governs the managed host.
+ansible_python_interpreter: /usr/bin/python3

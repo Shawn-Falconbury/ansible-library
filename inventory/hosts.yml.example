@@ -1,0 +1,44 @@
+---
+# Copy to inventory/hosts.yml and replace every value.
+#
+# All addresses below are RFC 5737 documentation ranges and all names resolve
+# under .example. Nothing here is routable. The CI leak check rejects any
+# address outside the documentation ranges, so a real address cannot be
+# committed to this file even by accident.
+#
+# Group names are referenced directly by the playbooks. If you rename a group,
+# either rename it consistently or override at run time with
+# -e target_ios_group=... on the playbooks that expose that variable.
+
+all:
+  children:
+
+    # -------------------------------------------------------------------
+    # Cisco IOS / IOS-XE devices reached over network_cli.
+    # -------------------------------------------------------------------
+    ios_devices:
+      children:
+        site_a_access:
+          hosts:
+            sw-a-access-01.lab.example:
+              ansible_host: 192.0.2.11
+            sw-a-access-02.lab.example:
+              ansible_host: 192.0.2.12
+        site_b_access:
+          hosts:
+            sw-b-access-01.lab.example:
+              ansible_host: 198.51.100.11
+        core:
+          hosts:
+            rtr-core-01.lab.example:
+              ansible_host: 203.0.113.1
+
+    # -------------------------------------------------------------------
+    # Linux hosts reached over SSH.
+    # -------------------------------------------------------------------
+    linux_hosts:
+      hosts:
+        app-01.lab.example:
+          ansible_host: 192.0.2.51
+        app-02.lab.example:
+          ansible_host: 192.0.2.52

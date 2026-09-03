@@ -1,0 +1,20 @@
+---
+# Negative cases: NONE of these may be flagged.
+mgmt_ip: 192.0.2.10
+peer_ip: 198.51.100.25
+site_c: 203.0.113.7
+loopback: 127.0.0.1
+v6_doc: 2001:db8::1
+relay: smtp.example.com
+contact: netops@example.com
+lab_host: switch01.lab.example
+ios_image: cat9k_iosxe.17.06.06.SPA.bin
+ios_image2: c2960x-universalk9-mz.152-7.E7.bin
+version_string: 15.2.7.E7
+snmp_community: "{{ vault_snmp_community }}"
+admin_password: CHANGEME_set_in_vault
+api_key: "!vault | $ANSIBLE_VAULT_PLACEHOLDER"
+bypass_checks: true
+listen_port: 8080
+passive_mode: false
+ansible_password: "{{ vault_ansible_password }}"

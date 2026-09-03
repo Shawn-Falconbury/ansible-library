@@ -1,0 +1,192 @@
+---
+# ===========================================================================
+# baseline_compliance.yml
+#
+# Audit Cisco IOS / IOS-XE devices against a version and configuration
+# baseline, over either SSH or SNMPv3.
+#
+# ---------------------------------------------------------------------------
+# ARCHITECTURE
+# ---------------------------------------------------------------------------
+#   tasks/collect_ssh.yml    ) transport-specific, touches devices
+#   tasks/collect_snmp.yml   )
+#   tasks/evaluate_baseline.yml   transport-agnostic, touches nothing
+#
+# Collection and evaluation are separate because the comparison logic is where
+# silent-failure bugs live, and logic welded to a live switch cannot be tested
+# in CI. Split this way, tests/test_baseline_logic.yml drives the evaluation
+# layer against recorded fixtures and proves the guards fire.
+#
+# ---------------------------------------------------------------------------
+# REQUIRED CONFIGURATION
+# ---------------------------------------------------------------------------
+# Inventory
+#   ios_devices        group of IOS/IOS-XE devices
+#
+# Variable files
+#   vars/baseline.yml  baseline_min_version, baseline_required_config,
+#                      baseline_forbidden_config
+#
+# Vault variables (SNMP transport only)
+#   vault_snmp_v3_user, vault_snmp_v3_auth_key, vault_snmp_v3_priv_key
+#
+# ---------------------------------------------------------------------------
+# OPTIONAL VARIABLES
+# ---------------------------------------------------------------------------
+#   baseline_transport        ssh | snmp             Default: ssh
+#   baseline_report_path      Default: ./reports/baseline_compliance.txt
+#   baseline_fail_on_noncompliant  Default: true
+#   mask_sensitive_output     Default: true. Set false to debug SNMP auth.
+#   snmp_conf_path            Default: /etc/ansible-reference/snmp
+#
+# ---------------------------------------------------------------------------
+# TRANSPORT COVERAGE -- THE TWO ARE NOT INTERCHANGEABLE
+# ---------------------------------------------------------------------------
+#   check              ssh    snmp
+#   ios_version        yes    yes
+#   config_saved       SKIP   yes     IOS has no clean CLI equivalent
+#   required_config    yes    SKIP    SNMP does not return running-config
+#   forbidden_config   yes    SKIP
+#
+# Neither transport covers everything. Before any cutover, run BOTH against
+# the same inventory and diff the reports -- a transport swap changes which
+# checks are evaluated at all, and a report full of SKIPs that used to be
+# PASSes is easy to miss if you only look at the failure count.
+#
+# ---------------------------------------------------------------------------
+# WHAT FAILS IF MISCONFIGURED
+# ---------------------------------------------------------------------------
+#   No family key for a model       ios_version SKIPs. Cross-family version
+#                                   comparison is meaningless, so the playbook
+#                                   refuses rather than guessing.
+#   Model matches multiple keys     ios_version SKIPs as ambiguous.
+#   snmpget without -Ovqt           config_saved SKIPs with an explanatory
+#                                   reason. It does NOT silently PASS.
+#   mask_sensitive_output=true and
+#     bad SNMP credentials          Task output censored; the following task
+#                                   reports the exit code. Re-run with
+#                                   mask_sensitive_output=false.
+#
+# ---------------------------------------------------------------------------
+# USAGE
+# ---------------------------------------------------------------------------
+#   ansible-playbook playbooks/network/baseline_compliance.yml
+#   ansible-playbook playbooks/network/baseline_compliance.yml \
+#       -e baseline_transport=snmp
+#   ansible-playbook playbooks/network/baseline_compliance.yml \
+#       --limit site_a_access -e baseline_fail_on_noncompliant=false
+# ===========================================================================
+
+- name: Audit devices against the baseline
+  hosts: ios_devices
+  gather_facts: false
+
+  vars_files:
+    - ../../vars/baseline.yml
+
+  vars:
+    baseline_transport: "{{ baseline_transport | default('ssh') }}"
+    bc_collection_failed: false
+
+  tasks:
+    - name: Reject an unknown transport before touching any device
+      ansible.builtin.assert:
+        that:
+          - baseline_transport in ['ssh', 'snmp']
+        fail_msg: >-
+          baseline_transport must be 'ssh' or 'snmp', got
+          '{{ baseline_transport }}'.
+        quiet: true
+      run_once: true
+      delegate_to: localhost
+
+    - name: Collect device data
+      ansible.builtin.include_tasks: "tasks/collect_{{ baseline_transport }}.yml"
+
+    - name: Evaluate against the baseline
+      ansible.builtin.include_tasks: tasks/evaluate_baseline.yml
+      when: not bc_collection_failed
+
+- name: Render the compliance report
+  hosts: ios_devices
+  gather_facts: false
+  # NOTE: run_once and delegate_to are TASK keywords. At play level they parse
+  # as valid YAML and then fail at execution time. They are applied per task.
+  #
+  # delegate_to rather than connection: local -- ansible_connection in
+  # group_vars outranks a play-level connection keyword, so connection: local
+  # here would be silently ignored and these tasks dispatched at a switch.
+  # See docs/gotchas.md entry 4.
+
+  vars:
+    baseline_report_path: >-
+      {{ baseline_report_path | default('./reports/baseline_compliance.txt') }}
+    baseline_fail_on_noncompliant: >-
+      {{ baseline_fail_on_noncompliant | default(true) }}
+    _bc_unreachable: >-
+      {{ ansible_play_hosts_all | difference(ansible_play_hosts) }}
+
+  tasks:
+    - name: Guard against an empty play
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length > 0
+        fail_msg: >-
+          The play matched zero hosts. An empty run is not a passing run.
+        quiet: true
+
+    - name: Ensure the report directory exists
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.file:
+        path: "{{ baseline_report_path | dirname }}"
+        state: directory
+        mode: "0750"
+
+    - name: Render the report
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.template:
+        src: ../../templates/baseline_report.txt.j2
+        dest: "{{ baseline_report_path }}"
+        mode: "0640"
+
+    - name: Summarise
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.debug:
+        msg:
+          - "Transport:     {{ baseline_transport | default('ssh') }}"
+          - "In scope:      {{ ansible_play_hosts_all | length }}"
+          - "Unreachable:   {{ _bc_unreachable | length }}"
+          - "Compliant:     {{ _bc_pass | length }}"
+          - "Non-compliant: {{ _bc_fail | length }}"
+          - "Unevaluated:   {{ _bc_skip | length }}"
+          - "Report:        {{ baseline_report_path }}"
+      vars:
+        _bc_pass: "{{ ansible_play_hosts | map('extract', hostvars, 'bc_verdict') | select('eq', 'PASS') | list }}"
+        _bc_fail: "{{ ansible_play_hosts | map('extract', hostvars, 'bc_verdict') | select('eq', 'FAIL') | list }}"
+        _bc_skip: "{{ ansible_play_hosts | map('extract', hostvars, 'bc_verdict') | select('eq', 'SKIP') | list }}"
+
+    - name: Fail if any device is non-compliant or unevaluated
+      run_once: true
+      delegate_to: localhost
+      # Runs last so the report is written even when the play will fail. A run
+      # that aborts before producing its artefact is much harder to triage.
+      #
+      # SKIP counts against the run. A device whose checks could not be
+      # evaluated is not compliant -- it is unknown, and treating unknown as
+      # acceptable is the same mistake as the TimeTicks false-PASS one level
+      # down.
+      ansible.builtin.assert:
+        that:
+          - _bc_unreachable | length == 0
+          - ansible_play_hosts | map('extract', hostvars, 'bc_verdict') | reject('eq', 'PASS') | list | length == 0
+        fail_msg: >-
+          Not all devices are compliant. Unreachable:
+          {{ _bc_unreachable | join(', ') | default('none', true) }}.
+          See {{ baseline_report_path }} for per-check detail.
+        success_msg: "All devices compliant."
+      when: baseline_fail_on_noncompliant | bool

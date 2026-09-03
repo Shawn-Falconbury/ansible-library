@@ -1,0 +1,46 @@
+Baseline Compliance Report
+Generated: {{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}
+Transport: {{ baseline_transport | default('ssh') }}
+
+{% set unreachable = ansible_play_hosts_all | difference(ansible_play_hosts) %}
+In scope:      {{ ansible_play_hosts_all | length }}
+Unreachable:   {{ unreachable | length }}
+Compliant:     {{ ansible_play_hosts | map('extract', hostvars, 'bc_verdict') | select('eq', 'PASS') | list | length }}
+Non-compliant: {{ ansible_play_hosts | map('extract', hostvars, 'bc_verdict') | select('eq', 'FAIL') | list | length }}
+Unevaluated:   {{ ansible_play_hosts | map('extract', hostvars, 'bc_verdict') | select('eq', 'SKIP') | list | length }}
+
+{# Unreachable devices are rendered from the play-host diff, not from a loop
+   over survivors. They are already gone from ansible_play_hosts, so a report
+   built only from survivors omits them entirely and their absence reads as
+   success. No metric columns for them -- a defaulted zero renders as a real
+   measurement. #}
+{% if unreachable | length > 0 %}
+UNREACHABLE
+{% for host in unreachable | sort %}
+  {{ "%-32s" | format(host) }} no session established
+{% endfor %}
+
+{% endif %}
+{% for host in ansible_play_hosts | sort %}
+{%   set hv = hostvars[host] %}
+{%   if hv.bc_collection_failed | default(false) %}
+{{ host }}  [COLLECTION FAILED]
+  {{ hv.bc_collection_error | default('no detail') }}
+
+{%   else %}
+{{ host }}  [{{ hv.bc_verdict | default('UNKNOWN') }}]
+  model: {{ hv.bc_facts.model | default('unknown') }}   version: {{ hv.bc_facts.version | default('unknown') }}
+{%     for r in hv.bc_results | default([]) %}
+  {{ "%-6s" | format(r.status) }} {{ "%-18s" | format(r.check) }} expected={{ r.expected }}  actual={{ r.actual }}
+{%       if r.reason %}
+         reason: {{ r.reason }}
+{%       endif %}
+{%     endfor %}
+
+{%   endif %}
+{% endfor %}
+LEGEND
+  PASS  check evaluated and satisfied
+  FAIL  check evaluated and violated
+  SKIP  check could NOT be evaluated -- this is not a pass. The reason line
+        states why. A device with any SKIP is unevaluated, not compliant.

@@ -1,0 +1,14 @@
+---
+repos:
+  - repo: local
+    hooks:
+      - id: leak-check
+        name: leak check
+        entry: python3 scripts/leak_check.py
+        language: system
+        pass_filenames: false
+        always_run: true
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.35.1
+    hooks:
+      - id: yamllint

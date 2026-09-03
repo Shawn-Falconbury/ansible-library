@@ -1,0 +1,240 @@
+---
+# Fixture set for playbooks/network/tasks/evaluate_baseline.yml
+#
+# Each case supplies a bc_facts dictionary and the status every check MUST
+# return. The harness asserts the exact status, so a guard that stops firing
+# fails a specific named case rather than quietly widening what passes.
+#
+# All values are synthetic. No fixture here was recorded from a real device.
+
+baseline_cases:
+
+  # -----------------------------------------------------------------------
+  # THE CASE THIS WHOLE FILE EXISTS FOR.
+  # Formatted TimeTicks from `snmpget -Ovq`. `| int` yields 0 on both sides,
+  # 0 <= 0 is true, and an unguarded check reports PASS on every device
+  # forever. The guard must force SKIP.
+  # -----------------------------------------------------------------------
+  - name: timeticks_formatted_must_skip
+    description: >-
+      Formatted TimeTicks must SKIP, never PASS. This is the silent
+      false-PASS the numeric guard exists to prevent.
+    facts:
+      name: sw-fixture-01
+      model: "WS-C2960X-48FPS-L"
+      version: "15.2(7)E7"
+      running_config:
+        - "service password-encryption"
+        - "no ip http server"
+        - "logging buffered 32768"
+      running_last_changed: "9:0:07:42.73"
+      startup_last_saved: "9:0:07:42.73"
+    expect:
+      ios_version: PASS
+      config_saved: SKIP
+      required_config: PASS
+      forbidden_config: PASS
+      verdict: SKIP
+
+  # -----------------------------------------------------------------------
+  # Control case: same device, values collected correctly with -Ovqt.
+  # Proves the guard permits a genuine comparison rather than blocking all.
+  # -----------------------------------------------------------------------
+  - name: timeticks_raw_saved_must_pass
+    description: Raw integer TimeTicks, running saved before startup write.
+    facts:
+      name: sw-fixture-02
+      model: "WS-C2960X-48FPS-L"
+      version: "15.2(7)E7"
+      running_config:
+        - "service password-encryption"
+        - "no ip http server"
+        - "logging buffered 32768"
+      running_last_changed: "3120842"
+      startup_last_saved: "3120999"
+    expect:
+      ios_version: PASS
+      config_saved: PASS
+      required_config: PASS
+      forbidden_config: PASS
+      verdict: PASS
+
+  # -----------------------------------------------------------------------
+  # The condition the check is actually for: unsaved running config.
+  # If this returns PASS the check is inverted.
+  # -----------------------------------------------------------------------
+  - name: timeticks_raw_unsaved_must_fail
+    description: Running config changed after the last save.
+    facts:
+      name: sw-fixture-03
+      model: "WS-C2960X-48FPS-L"
+      version: "15.2(7)E7"
+      running_config:
+        - "service password-encryption"
+        - "no ip http server"
+        - "logging buffered 32768"
+      running_last_changed: "3999000"
+      startup_last_saved: "3120999"
+    expect:
+      ios_version: PASS
+      config_saved: FAIL
+      required_config: PASS
+      forbidden_config: PASS
+      verdict: FAIL
+
+  # -----------------------------------------------------------------------
+  # Empty OID response. A missing measurement is not a passing one.
+  # -----------------------------------------------------------------------
+  - name: timeticks_empty_must_skip
+    description: OID returned nothing; must SKIP rather than treat as zero.
+    facts:
+      name: sw-fixture-04
+      model: "WS-C2960X-48FPS-L"
+      version: "15.2(7)E7"
+      running_config:
+        - "service password-encryption"
+        - "no ip http server"
+        - "logging buffered 32768"
+      running_last_changed: ""
+      startup_last_saved: ""
+    expect:
+      ios_version: PASS
+      config_saved: SKIP
+      required_config: PASS
+      forbidden_config: PASS
+      verdict: SKIP
+
+  # -----------------------------------------------------------------------
+  # A decimal value also fails the bare-integer guard. Catches a partial fix
+  # that strips the colons but leaves the fractional part.
+  # -----------------------------------------------------------------------
+  - name: timeticks_decimal_must_skip
+    description: Decimal TimeTicks must SKIP; the guard requires a bare integer.
+    facts:
+      name: sw-fixture-05
+      model: "WS-C2960X-48FPS-L"
+      version: "15.2(7)E7"
+      running_config:
+        - "service password-encryption"
+        - "no ip http server"
+        - "logging buffered 32768"
+      running_last_changed: "312084.27"
+      startup_last_saved: "312099.90"
+    expect:
+      ios_version: PASS
+      config_saved: SKIP
+      required_config: PASS
+      forbidden_config: PASS
+      verdict: SKIP
+
+  # -----------------------------------------------------------------------
+  # Version below the family minimum.
+  # -----------------------------------------------------------------------
+  - name: version_below_minimum_must_fail
+    description: IOS-XE below the family baseline.
+    facts:
+      name: sw-fixture-06
+      model: "C9200L-48P-4G"
+      version: "17.03.04"
+      running_config:
+        - "service password-encryption"
+        - "no ip http server"
+        - "logging buffered 32768"
+      running_last_changed: "100"
+      startup_last_saved: "200"
+    expect:
+      ios_version: FAIL
+      config_saved: PASS
+      required_config: PASS
+      forbidden_config: PASS
+      verdict: FAIL
+
+  # -----------------------------------------------------------------------
+  # Text sort would rank E10 BELOW E7, because '1' sorts before '7'.
+  # Integer-list comparison must rank it above.
+  # -----------------------------------------------------------------------
+  - name: version_double_digit_revision_must_pass
+    description: >-
+      15.2(7)E10 is newer than the 15.2(7)E7 baseline. A string comparison
+      gets this backwards; list-of-integers comparison gets it right.
+    facts:
+      name: sw-fixture-07
+      model: "WS-C2960X-48FPS-L"
+      version: "15.2(7)E10"
+      running_config:
+        - "service password-encryption"
+        - "no ip http server"
+        - "logging buffered 32768"
+      running_last_changed: "100"
+      startup_last_saved: "200"
+    expect:
+      ios_version: PASS
+      config_saved: PASS
+      required_config: PASS
+      forbidden_config: PASS
+      verdict: PASS
+
+  # -----------------------------------------------------------------------
+  # Unknown platform. Cross-family comparison is meaningless, so SKIP.
+  # -----------------------------------------------------------------------
+  - name: unknown_model_must_skip
+    description: No baseline entry for this family; refuse to compare.
+    facts:
+      name: sw-fixture-08
+      model: "C9500-32C"
+      version: "17.09.03"
+      running_config:
+        - "service password-encryption"
+        - "no ip http server"
+        - "logging buffered 32768"
+      running_last_changed: "100"
+      startup_last_saved: "200"
+    expect:
+      ios_version: SKIP
+      config_saved: PASS
+      required_config: PASS
+      forbidden_config: PASS
+      verdict: SKIP
+
+  # -----------------------------------------------------------------------
+  # Missing and forbidden configuration lines.
+  # -----------------------------------------------------------------------
+  - name: config_violations_must_fail
+    description: A required line missing and a forbidden line present.
+    facts:
+      name: sw-fixture-09
+      model: "WS-C2960X-48FPS-L"
+      version: "15.2(7)E7"
+      running_config:
+        - "no service password-encryption"
+        - "ip http server"
+        - "logging buffered 32768"
+      running_last_changed: "100"
+      startup_last_saved: "200"
+    expect:
+      ios_version: PASS
+      config_saved: PASS
+      required_config: FAIL
+      forbidden_config: FAIL
+      verdict: FAIL
+
+  # -----------------------------------------------------------------------
+  # Empty config must SKIP both config checks. "Line is absent" is vacuously
+  # true against a config that was never retrieved, which would otherwise
+  # report a clean bill of health for a device that answered nothing.
+  # -----------------------------------------------------------------------
+  - name: empty_config_must_skip
+    description: No configuration retrieved; absence cannot be asserted.
+    facts:
+      name: sw-fixture-10
+      model: "WS-C2960X-48FPS-L"
+      version: "15.2(7)E7"
+      running_config: []
+      running_last_changed: "100"
+      startup_last_saved: "200"
+    expect:
+      ios_version: PASS
+      config_saved: PASS
+      required_config: SKIP
+      forbidden_config: SKIP
+      verdict: SKIP

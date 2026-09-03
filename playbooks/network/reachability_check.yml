@@ -1,0 +1,236 @@
+---
+# ===========================================================================
+# reachability_check.yml
+#
+# Verify that every host in the inventory is actually reachable, and report
+# the ones that are not.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS PLAYBOOK EXISTS
+# ---------------------------------------------------------------------------
+# The obvious implementation of this playbook is wrong, and wrong in a way
+# that produces a green report during a total outage.
+#
+#   - hosts: all
+#     tasks:
+#       - ansible.builtin.ping:
+#
+# For a Linux host over SSH that is a real test. For a host whose connection
+# plugin is network_cli, it is not. ansible.builtin.ping is resolved by an
+# action plugin that runs on the CONTROL NODE. It returns "pong" without ever
+# opening a session to the device. A switch that has been powered off for
+# months will answer this play successfully.
+#
+# The correct test is a task that must actually transact with the device. For
+# Cisco IOS/IOS-XE that is cisco.ios.ios_facts. For Linux it remains
+# ansible.builtin.ping. This playbook therefore splits by host class rather
+# than using one module everywhere.
+#
+# The second trap is subtler. Ansible removes unreachable hosts from the play
+# BEFORE subsequent tasks are evaluated. They do not fail; they vanish. Any
+# report built only from hosts that survived to the reporting task will show
+# 100% healthy, because the broken hosts are no longer in the loop. Detecting
+# them requires comparing ansible_play_hosts_all (everyone the play started
+# with) against ansible_play_hosts (everyone still standing). That diff is the
+# only thing that surfaces a dead host.
+#
+# ---------------------------------------------------------------------------
+# REQUIRED CONFIGURATION
+# ---------------------------------------------------------------------------
+# Inventory groups
+#   ios_devices    Cisco IOS / IOS-XE devices reached via network_cli.
+#                  Must set ansible_network_os: cisco.ios.ios
+#   linux_hosts    Linux hosts reached over SSH.
+#   Rename these to match your inventory, or override with -e at run time.
+#
+# Group variables (see inventory/group_vars/*.yml.example)
+#   ansible_network_os        cisco.ios.ios          (ios_devices)
+#   ansible_connection        network_cli            (ios_devices)
+#   ansible_connection        ssh                    (linux_hosts)
+#   ansible_user              account used to log in
+#   ansible_password          reference a vaulted variable, never a literal
+#
+# ---------------------------------------------------------------------------
+# OPTIONAL VARIABLES
+# ---------------------------------------------------------------------------
+#   reachability_report_path    Where to write the report.
+#                               Default: ./reports/reachability.txt
+#   reachability_fail_on_down   Exit non-zero if any host is unreachable.
+#                               Default: true. Set false for a purely
+#                               informational scheduled run.
+#   reachability_timeout        Per-connection timeout in seconds.
+#                               Default: 30
+#
+# ---------------------------------------------------------------------------
+# ASSUMPTIONS
+# ---------------------------------------------------------------------------
+#   * ansible_connection is defined in group_vars, not at play level. Setting
+#     connection: local on the play does NOT override a group_vars value --
+#     group_vars wins. Use delegate_to: localhost when you need a task to run
+#     on the control node.
+#   * The control node can resolve and route to every device. This playbook
+#     reports unreachability; it does not diagnose whether the cause is DNS,
+#     routing, credentials, or a dead device.
+#
+# ---------------------------------------------------------------------------
+# WHAT FAILS IF MISCONFIGURED
+# ---------------------------------------------------------------------------
+#   ansible_network_os unset        ios_facts errors with a connection plugin
+#                                   message rather than a timeout. The host is
+#                                   reported down, which is a false positive.
+#   Group named incorrectly         The play matches zero hosts and reports
+#                                   "0 unreachable" -- a silent pass. The
+#                                   assert at the end of play 3 guards this.
+#   gather_facts left on for IOS    Fact gathering uses the setup module,
+#                                   which is not valid over network_cli.
+#
+# ---------------------------------------------------------------------------
+# USAGE
+# ---------------------------------------------------------------------------
+#   ansible-playbook playbooks/network/reachability_check.yml
+#   ansible-playbook playbooks/network/reachability_check.yml \
+#       -e reachability_fail_on_down=false
+#   ansible-playbook playbooks/network/reachability_check.yml --limit ios_devices
+# ===========================================================================
+
+- name: Probe Cisco IOS devices
+  hosts: ios_devices
+  gather_facts: false
+  # No connection: setting here on purpose. ansible_connection belongs in
+  # group_vars; a play-level value would be silently outranked by it and give
+  # the false impression that this play controls the transport.
+
+  vars:
+    reachability_timeout: "{{ reachability_timeout | default(30) }}"
+
+  tasks:
+    - name: Retrieve device facts over network_cli
+      # This is the actual reachability test. It must open a session and
+      # transact. Do NOT substitute ansible.builtin.ping here -- see the
+      # header block for why it would report success on a dead device.
+      cisco.ios.ios_facts:
+        gather_subset:
+          - min
+      register: ios_probe
+      ignore_errors: true
+      ignore_unreachable: true
+      vars:
+        ansible_command_timeout: "{{ reachability_timeout }}"
+        ansible_connect_timeout: "{{ reachability_timeout }}"
+
+    - name: Record probe outcome
+      ansible.builtin.set_fact:
+        reachability_status: >-
+          {{ 'OK' if (ios_probe is defined and not ios_probe.failed | default(true))
+             else 'DOWN' }}
+        reachability_class: ios
+        reachability_detail: >-
+          {{ ios_probe.msg | default('') if ios_probe.failed | default(false)
+             else '' }}
+
+- name: Probe Linux hosts
+  hosts: linux_hosts
+  gather_facts: false
+
+  vars:
+    reachability_timeout: "{{ reachability_timeout | default(30) }}"
+
+  tasks:
+    - name: Confirm the SSH transport round-trips
+      # For an SSH-connected host, ping IS a genuine test: the module is
+      # copied to the target and executed there.
+      ansible.builtin.ping:
+      register: linux_probe
+      ignore_errors: true
+      ignore_unreachable: true
+
+    - name: Record probe outcome
+      ansible.builtin.set_fact:
+        reachability_status: >-
+          {{ 'OK' if (linux_probe is defined and not linux_probe.failed | default(true))
+             else 'DOWN' }}
+        reachability_class: linux
+        reachability_detail: >-
+          {{ linux_probe.msg | default('') if linux_probe.failed | default(false)
+             else '' }}
+
+- name: Build and emit the reachability report
+  hosts: ios_devices:linux_hosts
+  gather_facts: false
+  # NOTE: run_once and delegate_to are TASK keywords, not play keywords.
+  # Placing them here parses as YAML and then fails at execution with
+  # "'delegate_to' is not a valid attribute for a Play". They are applied per
+  # task below.
+  #
+  # delegate_to: localhost rather than connection: local -- on a network_cli
+  # host the group_vars ansible_connection outranks a play-level connection
+  # keyword, so a local task must be delegated explicitly.
+
+  vars:
+    reachability_report_path: >-
+      {{ reachability_report_path | default('./reports/reachability.txt') }}
+    reachability_fail_on_down: "{{ reachability_fail_on_down | default(true) }}"
+
+    # The critical diff. Hosts that were unreachable are already gone from
+    # ansible_play_hosts. Without this comparison they are simply absent from
+    # the report and read as healthy by omission.
+    _hosts_started: "{{ ansible_play_hosts_all }}"
+    _hosts_surviving: "{{ ansible_play_hosts }}"
+    _hosts_vanished: >-
+      {{ ansible_play_hosts_all | difference(ansible_play_hosts) }}
+
+  tasks:
+    - name: Guard against an empty play
+      run_once: true
+      delegate_to: localhost
+      # A typo in a group name matches zero hosts and produces a clean report
+      # with nothing in it. That is indistinguishable from success unless it
+      # is asserted against.
+      ansible.builtin.assert:
+        that:
+          - _hosts_started | length > 0
+        fail_msg: >-
+          The play matched zero hosts. Check that the inventory groups
+          'ios_devices' and 'linux_hosts' exist and are populated. An empty
+          run is not a passing run.
+        success_msg: "{{ _hosts_started | length }} host(s) in scope."
+
+    - name: Ensure the report directory exists
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.file:
+        path: "{{ reachability_report_path | dirname }}"
+        state: directory
+        mode: "0750"
+
+    - name: Render the report
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.template:
+        src: ../../templates/reachability_report.txt.j2
+        dest: "{{ reachability_report_path }}"
+        mode: "0640"
+
+    - name: Summarise to stdout
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.debug:
+        msg:
+          - "In scope:     {{ _hosts_started | length }}"
+          - "Responded:    {{ _hosts_surviving | length }}"
+          - "Unreachable:  {{ _hosts_vanished | length }}"
+          - "Report:       {{ reachability_report_path }}"
+
+    - name: Fail if any host is unreachable
+      run_once: true
+      delegate_to: localhost
+      # Deliberately last, so the report is always written even when the play
+      # is going to fail. A run that fails before producing its artefact is
+      # much harder to triage.
+      ansible.builtin.assert:
+        that:
+          - _hosts_vanished | length == 0
+        fail_msg: >-
+          Unreachable: {{ _hosts_vanished | join(', ') }}
+        success_msg: "All hosts responded."
+      when: reachability_fail_on_down | bool

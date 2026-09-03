@@ -1,0 +1,298 @@
+---
+# ===========================================================================
+# tasks/evaluate_baseline.yml
+#
+# Evaluate collected device data against the baseline. Produces bc_results.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS IS A SEPARATE FILE
+# ---------------------------------------------------------------------------
+# This file performs NO device access. Every input arrives in the bc_facts
+# dictionary, already collected by tasks/collect_ssh.yml or
+# tasks/collect_snmp.yml.
+#
+# That separation is the whole reason the logic is testable. Comparison and
+# threshold code is where the silent-failure bugs live, and it is exactly the
+# code you cannot exercise in CI if it is welded to a live switch. Split this
+# way, tests/test_baseline_logic.yml can drive it against recorded fixtures on
+# localhost and prove the guards actually fire.
+#
+# ---------------------------------------------------------------------------
+# INPUT: bc_facts
+# ---------------------------------------------------------------------------
+#   name                  str   Device identifier, for reporting only.
+#   model                 str   Model string as reported by the device.
+#   version               str   IOS/IOS-XE version string.
+#   running_config        list  Configuration lines (may be empty).
+#   running_last_changed  str   ccmHistoryRunningLastChanged, RAW.
+#   startup_last_saved    str   ccmHistoryStartupLastSaved, RAW.
+#
+# The two timestamp fields are deliberately typed as strings, not integers.
+# They arrive from snmpget as text and the entire point of the config_saved
+# check is to interrogate that text before trusting it. Coercing on the way in
+# would destroy the evidence this check depends on.
+#
+# ---------------------------------------------------------------------------
+# OUTPUT: bc_results
+# ---------------------------------------------------------------------------
+# A list of dicts, one per check:
+#   check     str  Check identifier.
+#   status    str  PASS | FAIL | SKIP
+#   expected  str  What was required.
+#   actual    str  What was observed.
+#   reason    str  Present on SKIP and FAIL; explains the verdict.
+#
+# SKIP is a first-class outcome and is NEVER equivalent to PASS. A check that
+# could not evaluate its input has not passed, and the report must say so.
+# ===========================================================================
+
+- name: Reset per-device evaluation state
+  # Facts persist across loop iterations. Without an explicit reset, a device
+  # that fails to produce a value inherits the previous device's result and
+  # the report shows a plausible verdict computed from someone else's data.
+  ansible.builtin.set_fact:
+    bc_results: []
+    _bc_version_status: ""
+    _bc_saved_status: ""
+
+# ---------------------------------------------------------------------------
+# Check 1: IOS version against the per-family baseline
+# ---------------------------------------------------------------------------
+
+- name: Determine which baseline family applies to this model
+  # Keys of baseline_min_version are matched as substrings of the model
+  # string. Cross-family version comparison is meaningless -- classic IOS
+  # 15.2(7)E7 and IOS-XE 17.06.05 are not points on the same scale -- so a
+  # model with no family entry is SKIPped rather than compared against a
+  # catch-all default.
+  ansible.builtin.set_fact:
+    _bc_family_matches: >-
+      {{ baseline_min_version.keys() | select('in', bc_facts.model) | list }}
+
+- name: Evaluate IOS version
+  ansible.builtin.set_fact:
+    _bc_version_result: >-
+      {{
+        {
+          'check': 'ios_version',
+          'status': 'SKIP',
+          'expected': 'n/a',
+          'actual': bc_facts.version | default(''),
+          'reason': 'no baseline defined for model ' ~ (bc_facts.model | default('?'))
+        }
+        if _bc_family_matches | length == 0
+        else (
+          {
+            'check': 'ios_version',
+            'status': 'SKIP',
+            'expected': 'n/a',
+            'actual': bc_facts.version | default(''),
+            'reason': 'model ' ~ bc_facts.model ~ ' matches multiple baseline keys: '
+                      ~ (_bc_family_matches | join(', ')) ~ ' -- ambiguous, refusing to guess'
+          }
+          if _bc_family_matches | length > 1
+          else (
+            {
+              'check': 'ios_version',
+              'status': 'SKIP',
+              'expected': baseline_min_version[_bc_family_matches[0]],
+              'actual': bc_facts.version | default(''),
+              'reason': 'device reported no version string'
+            }
+            if (bc_facts.version | default('')) | length == 0
+            else {
+              'check': 'ios_version',
+              'status': ('PASS' if _bc_version_actual >= _bc_version_required else 'FAIL'),
+              'expected': baseline_min_version[_bc_family_matches[0]],
+              'actual': bc_facts.version,
+              'reason': ('' if _bc_version_actual >= _bc_version_required
+                         else 'below minimum for family ' ~ _bc_family_matches[0])
+            }
+          )
+        )
+      }}
+  vars:
+    # IOS version strings are not semver and do not sort as text. "15.2(7)E7"
+    # compared as a string against "15.2(7)E10" puts E10 first, because '1'
+    # sorts before '7'.
+    #
+    # Extract the digit runs and compare as a list of integers. Python
+    # compares lists element-wise, so [15, 2, 7, 10] > [15, 2, 7, 7] resolves
+    # correctly with no zero-padding needed. Pad to four elements so a short
+    # version string does not compare as a prefix.
+    _bc_version_actual: >-
+      {{ (((bc_facts.version | default('')) | regex_findall('[0-9]+'))
+          + ['0', '0', '0', '0'])[:4] | map('int') | list }}
+    _bc_version_required: >-
+      {{ ((baseline_min_version[_bc_family_matches[0]] | regex_findall('[0-9]+'))
+          + ['0', '0', '0', '0'])[:4] | map('int') | list
+         if _bc_family_matches | length == 1 else [] }}
+
+- name: Record version result
+  ansible.builtin.set_fact:
+    bc_results: "{{ bc_results + [_bc_version_result] }}"
+
+# ---------------------------------------------------------------------------
+# Check 2: running configuration saved to startup
+# ---------------------------------------------------------------------------
+# THE SILENT FALSE-PASS THIS CHECK EXISTS TO PREVENT
+#
+# ccmHistoryRunningLastChanged and ccmHistoryStartupLastSaved are TimeTicks.
+# Under `snmpget -Ovq` net-snmp renders them for human consumption:
+#
+#     9:0:07:42.73
+#
+# Applying `| int` to that string returns 0. Not an error -- zero. Both sides
+# of the comparison become 0, `0 <= 0` is true, and every device on the fleet
+# reports PASS forever. The check appears to work. It is measuring nothing.
+#
+# Two defences, both required:
+#
+#   1. Collect with `-Ovqt`, which forces raw integer output.
+#   2. Guard here. Never trust that the collector used the right flag -- a
+#      future edit, a different net-snmp build, or an snmp.conf setting can
+#      reintroduce formatted output. If either value is not a bare integer,
+#      force SKIP.
+#
+# SKIP, specifically. Not PASS. The whole failure mode being defended against
+# is a check that reports success while blind.
+# ---------------------------------------------------------------------------
+
+- name: Evaluate whether the running configuration has been saved
+  ansible.builtin.set_fact:
+    _bc_saved_result: >-
+      {{
+        {
+          'check': 'config_saved',
+          'status': 'SKIP',
+          'expected': 'running <= startup',
+          'actual': _bc_raw_pair,
+          'reason': _bc_skip_reason
+        }
+        if not (_bc_le_numeric)
+        else {
+          'check': 'config_saved',
+          'status': ('PASS' if (bc_facts.running_last_changed | int)
+                             <= (bc_facts.startup_last_saved | int) else 'FAIL'),
+          'expected': 'running <= startup',
+          'actual': _bc_raw_pair,
+          'reason': ('' if (bc_facts.running_last_changed | int)
+                          <= (bc_facts.startup_last_saved | int)
+                     else 'running config changed after last save -- unsaved changes present')
+        }
+      }}
+  vars:
+    # The guard. Both values must be bare integers. `is match` anchors at the
+    # start, so the trailing $ is what rejects "12345.67" and "9:0:07:42.73".
+    # An empty or undefined value fails this too, which is correct -- a
+    # missing measurement is not a passing one.
+    _bc_le_numeric: >-
+      {{ (bc_facts.running_last_changed | default('') | string) is match('^[0-9]+$')
+         and (bc_facts.startup_last_saved | default('') | string) is match('^[0-9]+$') }}
+    _bc_raw_pair: >-
+      {{ 'running=' ~ (bc_facts.running_last_changed | default('<none>'))
+         ~ ' startup=' ~ (bc_facts.startup_last_saved | default('<none>')) }}
+    # Two different causes produce a non-numeric value, and they need
+    # different remedies. An empty value means the collector supplied nothing
+    # -- expected on the SSH transport, which has no clean equivalent of these
+    # OIDs. A populated but unparseable value means the collector ran but used
+    # the wrong output flag. Reporting one message for both sends whoever
+    # reads it looking in the wrong place.
+    _bc_values_absent: >-
+      {{ ((bc_facts.running_last_changed | default('') | string) | length == 0)
+         and ((bc_facts.startup_last_saved | default('') | string) | length == 0) }}
+    _bc_skip_reason: >-
+      {{ 'no TimeTicks values supplied by the collector. The SSH transport
+         does not expose these OIDs; run with baseline_transport=snmp to
+         evaluate this check.' | replace('\n', ' ') | regex_replace('\s+', ' ')
+         if _bc_values_absent
+         else 'non-numeric TimeTicks: refusing to compare. Collect with
+         `snmpget -Ovqt` for raw integers; `-Ovq` renders TimeTicks as a
+         formatted string and `| int` silently returns 0 on both sides,
+         which PASSes always.' | replace('\n', ' ') | regex_replace('\s+', ' ') }}
+
+- name: Record config-saved result
+  ansible.builtin.set_fact:
+    bc_results: "{{ bc_results + [_bc_saved_result] }}"
+
+# ---------------------------------------------------------------------------
+# Check 3: required configuration lines present
+# ---------------------------------------------------------------------------
+
+- name: Evaluate required configuration lines
+  ansible.builtin.set_fact:
+    _bc_required_result: >-
+      {{
+        {
+          'check': 'required_config',
+          'status': 'SKIP',
+          'expected': baseline_required_config | length | string ~ ' line(s)',
+          'actual': 'no configuration retrieved',
+          'reason': 'running configuration was empty -- cannot assert absence'
+        }
+        if (bc_facts.running_config | default([])) | length == 0
+        else {
+          'check': 'required_config',
+          'status': ('PASS' if _bc_missing | length == 0 else 'FAIL'),
+          'expected': baseline_required_config | length | string ~ ' line(s)',
+          'actual': (baseline_required_config | length - _bc_missing | length) | string
+                    ~ ' of ' ~ baseline_required_config | length | string ~ ' present',
+          'reason': ('' if _bc_missing | length == 0
+                     else 'missing: ' ~ (_bc_missing | join('; ')))
+        }
+      }}
+  vars:
+    # An empty running_config must SKIP, not PASS. A "line is absent" test
+    # against a config that was never retrieved is vacuously true for every
+    # line, which would report a clean bill of health for a device that
+    # answered nothing.
+    _bc_missing: >-
+      {{ baseline_required_config
+         | reject('in', bc_facts.running_config | default([])) | list }}
+
+- name: Record required-config result
+  ansible.builtin.set_fact:
+    bc_results: "{{ bc_results + [_bc_required_result] }}"
+
+# ---------------------------------------------------------------------------
+# Check 4: forbidden configuration lines absent
+# ---------------------------------------------------------------------------
+
+- name: Evaluate forbidden configuration lines
+  ansible.builtin.set_fact:
+    _bc_forbidden_result: >-
+      {{
+        {
+          'check': 'forbidden_config',
+          'status': 'SKIP',
+          'expected': 'none of ' ~ (baseline_forbidden_config | length | string),
+          'actual': 'no configuration retrieved',
+          'reason': 'running configuration was empty -- cannot assert absence'
+        }
+        if (bc_facts.running_config | default([])) | length == 0
+        else {
+          'check': 'forbidden_config',
+          'status': ('PASS' if _bc_present | length == 0 else 'FAIL'),
+          'expected': 'none of ' ~ (baseline_forbidden_config | length | string),
+          'actual': _bc_present | length | string ~ ' present',
+          'reason': ('' if _bc_present | length == 0
+                     else 'forbidden: ' ~ (_bc_present | join('; ')))
+        }
+      }}
+  vars:
+    _bc_present: >-
+      {{ baseline_forbidden_config
+         | select('in', bc_facts.running_config | default([])) | list }}
+
+- name: Record forbidden-config result
+  ansible.builtin.set_fact:
+    bc_results: "{{ bc_results + [_bc_forbidden_result] }}"
+
+- name: Summarise device verdict
+  ansible.builtin.set_fact:
+    bc_verdict: >-
+      {{ 'FAIL' if bc_results | selectattr('status', 'eq', 'FAIL') | list | length > 0
+         else ('SKIP' if bc_results | selectattr('status', 'eq', 'SKIP') | list | length > 0
+               else 'PASS') }}
+    # A device with any SKIP is NOT compliant. It is unevaluated. Rolling SKIP
+    # up into PASS is the same mistake as the TimeTicks bug one level higher.

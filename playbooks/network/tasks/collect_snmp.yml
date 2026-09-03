@@ -1,0 +1,98 @@
+---
+# ===========================================================================
+# tasks/collect_snmp.yml
+#
+# Collect baseline inputs over SNMPv3 using net-snmp CLI tools. Produces
+# bc_facts.
+#
+# WHY CLI TOOLS RATHER THAN A MODULE
+# community.general.snmp_facts has no ENTITY-MIB support, so model and serial
+# retrieval are unavailable through it. The net-snmp CLI tools handle the full
+# OID space and are already present on most control nodes.
+#
+# THE -Ovqt FLAG IS LOAD-BEARING
+#   -O v  value only, no OID prefix
+#   -O q  quick, no type annotation
+#   -O t  TimeTicks as a RAW INTEGER
+#
+# Without -t, net-snmp renders TimeTicks for humans as "9:0:07:42.73".
+# Applying `| int` to that returns 0, both sides of the config_saved
+# comparison become 0, and the check PASSes on every device forever. The
+# evaluation layer guards against this independently, but the flag is the
+# actual fix -- the guard only stops the bug from being silent.
+#
+# CREDENTIAL HANDLING
+# SNMPv3 credentials are passed as command arguments and would otherwise land
+# in logs. no_log is bound to mask_sensitive_output rather than hardcoded: a
+# hardcoded no_log censors the error text too, which makes an authentication
+# failure undebuggable. Set mask_sensitive_output=false while developing.
+#
+# Point the tools at an explicit config path outside any git working tree.
+# A service account whose $HOME resolves into a repository will otherwise have
+# ~/.snmp/snmp.conf land under version control, which is a credential leak.
+# ===========================================================================
+
+- name: Probe the device over SNMPv3
+  ansible.builtin.command:
+    argv:
+      - snmpget
+      - "-v3"
+      - "-l"
+      - "authPriv"
+      - "-u"
+      - "{{ vault_snmp_v3_user }}"
+      - "-a"
+      - "{{ snmp_auth_protocol | default('SHA') }}"
+      - "-A"
+      - "{{ vault_snmp_v3_auth_key }}"
+      - "-x"
+      - "{{ snmp_priv_protocol | default('AES') }}"
+      - "-X"
+      - "{{ vault_snmp_v3_priv_key }}"
+      - "-Ovqt"
+      - "-t"
+      - "{{ snmp_timeout | default(5) }}"
+      - "-r"
+      - "{{ snmp_retries | default(2) }}"
+      - "{{ ansible_host | default(inventory_hostname) }}"
+      - "1.3.6.1.2.1.1.1.0"          # sysDescr
+      - "1.3.6.1.4.1.9.9.43.1.1.1.0" # ccmHistoryRunningLastChanged
+      - "1.3.6.1.4.1.9.9.43.1.1.2.0" # ccmHistoryStartupLastSaved
+  environment:
+    SNMPCONFPATH: "{{ snmp_conf_path | default('/etc/ansible-reference/snmp') }}"
+  delegate_to: localhost
+  register: _bc_snmp
+  changed_when: false
+  failed_when: false
+  no_log: "{{ mask_sensitive_output | default(true) }}"
+
+- name: Surface an SNMP failure without printing the credentials
+  # Paired with no_log above. The task itself is censored, so the failure has
+  # to be re-raised here where the message can be constructed from the return
+  # code alone -- enough to diagnose, nothing sensitive.
+  ansible.builtin.set_fact:
+    bc_collection_failed: true
+    bc_collection_error: >-
+      snmpget exited {{ _bc_snmp.rc }}. Check SNMPv3 credentials, the
+      authPriv protocol pair, and reachability on UDP/161. Re-run with
+      -e mask_sensitive_output=false to see the underlying error.
+  when: _bc_snmp.rc != 0
+
+- name: Assemble bc_facts from the SNMP collection
+  ansible.builtin.set_fact:
+    bc_facts:
+      name: "{{ inventory_hostname }}"
+      model: "{{ _bc_lines[0] | default('') | regex_search('(WS-C[\\w-]+|C9[0-9]{3}[\\w-]*)') | default('', true) }}"
+      version: >-
+        {{ _bc_lines[0] | default('')
+           | regex_search('Version ([^,\\s]+)', '\\1') | first | default('') }}
+      # SNMP does not return the running configuration. The config checks will
+      # SKIP on this transport, which is correct and stated in the report.
+      running_config: []
+      # Kept as strings on purpose. The guard in evaluate_baseline.yml has to
+      # inspect the raw text; coercing here would destroy the evidence.
+      running_last_changed: "{{ _bc_lines[1] | default('') }}"
+      startup_last_saved: "{{ _bc_lines[2] | default('') }}"
+  vars:
+    _bc_lines: "{{ (_bc_snmp.stdout | default('')).splitlines() | map('trim') | list }}"
+  when: _bc_snmp.rc == 0

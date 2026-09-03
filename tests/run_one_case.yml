@@ -1,0 +1,62 @@
+---
+# ===========================================================================
+# run_one_case.yml
+#
+# Drive a single fixture case through the real evaluation logic and compare
+# every check status against what the fixture specifies.
+#
+# Divergences are ACCUMULATED rather than raised immediately. Failing on the
+# first mismatch hides the rest, and when a shared guard regresses the useful
+# signal is the full list of what broke together -- one failure looks like a
+# typo, six failures spanning every TimeTicks case identifies the cause.
+# ===========================================================================
+
+- name: "{{ case.name }}: run the real evaluation logic"
+  # The production task file, unmodified. Testing a reimplementation of the
+  # logic would prove only that the reimplementation is self-consistent.
+  ansible.builtin.include_tasks: ../playbooks/network/tasks/evaluate_baseline.yml
+  vars:
+    bc_facts: "{{ case.facts }}"
+
+- name: "{{ case.name }}: index results by check name"
+  # Fold the per-device verdict in alongside the individual checks so a
+  # fixture can assert on both through one uniform lookup.
+  ansible.builtin.set_fact:
+    _bc_effective: >-
+      {{ dict(bc_results | map(attribute='check')
+              | zip(bc_results | map(attribute='status')))
+         | combine({'verdict': bc_verdict}) }}
+
+- name: "{{ case.name }}: compare each expectation against the actual status"
+  # A loop with a `when`, rather than a selectattr chain. selectattr cannot
+  # reference the element under test while also indexing another structure by
+  # that element's key, so the filter-chain version fails on an undefined
+  # `item`. The loop is both workable and easier to read.
+  ansible.builtin.set_fact:
+    _bc_failed: >-
+      {{ (_bc_failed | default([]))
+         + [case.name ~ ' :: ' ~ exp.key
+            ~ ' :: expected ' ~ exp.value
+            ~ ', got ' ~ (_bc_effective[exp.key] | default('<absent>'))] }}
+  loop: "{{ case.expect | dict2items }}"
+  loop_control:
+    loop_var: exp
+    label: "{{ exp.key }}"
+  when: exp.value != (_bc_effective[exp.key] | default('<absent>'))
+
+- name: "{{ case.name }}: count the assertions made"
+  # Counted separately from the divergence accumulator. Folding the two
+  # together would only increment the count on a failure, so a suite that
+  # asserted nothing at all would report zero failures and read as green.
+  ansible.builtin.set_fact:
+    _bc_assertions: >-
+      {{ (_bc_assertions | default(0) | int) + (case.expect | length) }}
+
+- name: "{{ case.name }}: show the result line"
+  ansible.builtin.debug:
+    msg: >-
+      {{ '%-38s' | format(case.name) }}
+      {{ bc_results | map(attribute='check')
+         | zip(bc_results | map(attribute='status'))
+         | map('join', '=') | join('  ') }}
+      => {{ bc_verdict }}

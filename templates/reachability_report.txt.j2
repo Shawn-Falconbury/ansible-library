@@ -1,0 +1,24 @@
+Reachability Report
+Generated: {{ ansible_date_time.iso8601 | default(now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ')) }}
+
+In scope:    {{ ansible_play_hosts_all | length }}
+Responded:   {{ ansible_play_hosts | length }}
+Unreachable: {{ ansible_play_hosts_all | difference(ansible_play_hosts) | length }}
+
+{# Unreachable hosts are rendered FIRST and from the diff, not from a loop over
+   surviving hosts. They have no facts at all -- referencing hostvars fields on
+   them yields Undefined. Omit the metric columns rather than defaulting them
+   to zero, because a zero renders as a real measurement and reads as healthy. #}
+{% set down = ansible_play_hosts_all | difference(ansible_play_hosts) %}
+{% if down | length > 0 %}
+UNREACHABLE
+{% for host in down | sort %}
+  {{ "%-28s" | format(host) }} no session established
+{% endfor %}
+
+{% endif %}
+RESPONDED
+{% for host in ansible_play_hosts | sort %}
+{%   set hv = hostvars[host] %}
+  {{ "%-28s" | format(host) }} {{ "%-8s" | format(hv.reachability_class | default('unknown')) }} {{ hv.reachability_status | default('UNKNOWN') }}
+{% endfor %}

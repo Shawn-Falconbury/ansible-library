@@ -1,0 +1,12 @@
+---
+# Positive cases: every line below MUST be flagged.
+mgmt_ip: 10.42.7.9
+core_switch: 172.16.30.1
+public_host: 8.8.8.8
+v6_mgmt: 2001:4860:4860::8888
+mac_addr: 00:1a:2b:3c:4d:5e
+cisco_mac: 001a.2b3c.4d5e
+relay: smtp.acmecorp.com
+contact: netops@acmecorp.com
+snmp_community: s3cr3tstring
+vault_pass: hunter2correcthorse

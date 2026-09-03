@@ -1,0 +1,15 @@
+# Never commit a filled-in copy of an example file.
+inventory/hosts.yml
+inventory/group_vars/*.yml
+vars/*.yml
+!vars/*.yml.example
+ansible.cfg
+*.retry
+reports/
+collections/
+.vault_pass
+*.vault
+__pycache__/
+*.pyc
+.venv/
+venv/

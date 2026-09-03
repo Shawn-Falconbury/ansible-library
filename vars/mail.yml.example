@@ -1,0 +1,13 @@
+---
+# Copy to vars/mail.yml. Consumed by the reporting playbooks.
+#
+# Relay hostnames are environment data. Keep the real value out of git; this
+# file exists to document the shape only.
+
+mail_relay_host: "smtp.example.com"
+mail_relay_port: 25
+mail_from: "ansible-reports@example.com"
+mail_to:
+  - "netops@example.com"
+  - "oncall@example.com"
+mail_subject_prefix: "[ansible]"

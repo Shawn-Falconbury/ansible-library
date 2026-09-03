@@ -1,0 +1,80 @@
+---
+# ===========================================================================
+# test_baseline_logic.yml
+#
+# Exercise playbooks/network/tasks/evaluate_baseline.yml against recorded
+# fixtures. No device, no network, no credentials.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS PROVES
+# ---------------------------------------------------------------------------
+# Primarily that formatted TimeTicks force SKIP rather than PASS. That bug is
+# invisible in production -- every device reports PASS and the report looks
+# correct -- so the only way to know the guard works is to feed it the bad
+# value deliberately and assert on the outcome.
+#
+# The suite also pins the inverse: raw integers must still produce a real
+# PASS/FAIL verdict. A guard that rejects everything is as broken as one that
+# accepts everything, and it fails in the direction that looks responsible.
+#
+# ---------------------------------------------------------------------------
+# RUNNING
+# ---------------------------------------------------------------------------
+#   ansible-playbook -i localhost, tests/test_baseline_logic.yml
+#
+# Pass the inventory explicitly. Running against the project inventory risks
+# picking up group_vars that set ansible_connection, which outranks the
+# play-level connection keyword and would send these tasks at a device. See
+# docs/gotchas.md entry 4.
+# ===========================================================================
+
+- name: Fixture-based evaluation of the baseline compliance logic
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - fixtures/baseline/cases.yml
+
+  vars:
+    # The same baseline the production playbook consumes. Kept inline rather
+    # than read from vars/baseline.yml so a change to the operational
+    # thresholds cannot silently alter what the tests assert.
+    baseline_min_version:
+      "C9200": "17.06.05"
+      "WS-C3850": "16.12.09"
+      "WS-C2960X": "15.2(7)E7"
+    baseline_required_config:
+      - "service password-encryption"
+      - "no ip http server"
+      - "logging buffered 32768"
+    baseline_forbidden_config:
+      - "ip http server"
+      - "no service password-encryption"
+
+  tasks:
+    - name: Evaluate every fixture case
+      ansible.builtin.include_tasks: run_one_case.yml
+      loop: "{{ baseline_cases }}"
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+
+    - name: Report suite outcome
+      ansible.builtin.debug:
+        msg:
+          - "cases:    {{ baseline_cases | length }}"
+          - "assertions: {{ _bc_assertions | default(0) }}"
+          - "failed:   {{ _bc_failed | default([]) | length }}"
+
+    - name: Fail the suite if any case diverged
+      ansible.builtin.assert:
+        that:
+          - (_bc_failed | default([])) | length == 0
+        fail_msg: |-
+          Divergent cases:
+          {{ (_bc_failed | default([])) | join('
+          ') }}
+        success_msg: >-
+          All {{ _bc_assertions | default(0) }} assertions across
+          {{ baseline_cases | length }} cases behaved as specified.

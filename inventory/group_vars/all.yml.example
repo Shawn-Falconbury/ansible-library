@@ -1,0 +1,18 @@
+---
+# Copy to inventory/group_vars/all.yml.
+#
+# Nothing in this file may hold a literal credential. Every secret is a
+# reference to a vaulted variable defined elsewhere. The CI leak check treats
+# a "{{ vault_* }}" reference as acceptable and a bare string as a finding.
+
+# Where reports are written by the reporting playbooks.
+report_output_dir: "./reports"
+
+# Toggle for no_log across playbooks that handle credentials.
+#
+# Keep this a VARIABLE, never a hardcoded `no_log: true` on the task. Hardcoded
+# no_log makes credential problems undebuggable -- the task fails and the
+# output is suppressed, so there is nothing to read. Playbooks in this repo
+# pair the toggle with ignore_errors plus a following assert, so a failure
+# still surfaces as a named assertion even while the value stays masked.
+mask_sensitive_output: true

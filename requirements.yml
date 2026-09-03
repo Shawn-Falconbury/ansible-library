@@ -1,0 +1,13 @@
+---
+# Pin every collection. Left unpinned, a scheduler that re-resolves from
+# Galaxy on each run can install a different major version between two runs of
+# the same template and change behaviour with no commit to point at.
+collections:
+  - name: cisco.ios
+    version: "5.3.0"
+  - name: ansible.netcommon
+    version: "6.1.0"
+  - name: ansible.utils
+    version: "4.1.0"
+  - name: community.general
+    version: "8.6.0"

@@ -1,0 +1,52 @@
+---
+# ===========================================================================
+# tasks/collect_ssh.yml
+#
+# Collect baseline inputs over network_cli. Produces bc_facts.
+#
+# This file does collection ONLY. It makes no judgements -- every comparison
+# happens in evaluate_baseline.yml, which is what keeps the logic testable
+# without hardware.
+#
+# TRANSPORT LIMITATION
+# IOS exposes no clean CLI equivalent of ccmHistoryRunningLastChanged and
+# ccmHistoryStartupLastSaved. Rather than approximate them by diffing
+# `show running-config` against `show startup-config` -- which differ in
+# formatting on every device and would produce false FAILs -- this collector
+# supplies empty strings. The evaluation layer turns that into an explicit
+# SKIP naming the transport, so the report says the check was not performed
+# rather than implying it succeeded.
+# ===========================================================================
+
+- name: Gather device facts
+  cisco.ios.ios_facts:
+    gather_subset:
+      - min
+      - config
+  register: _bc_ssh_facts
+  ignore_errors: true
+  ignore_unreachable: true
+
+- name: Assemble bc_facts from the SSH collection
+  ansible.builtin.set_fact:
+    bc_facts:
+      name: "{{ inventory_hostname }}"
+      model: "{{ ansible_net_model | default('') }}"
+      version: "{{ ansible_net_version | default('') }}"
+      running_config: >-
+        {{ (ansible_net_config | default('')).splitlines()
+           | map('trim') | reject('eq', '') | reject('match', '^!') | list }}
+      # Deliberately empty. See the transport-limitation note above.
+      running_last_changed: ""
+      startup_last_saved: ""
+  when: not (_bc_ssh_facts.failed | default(false))
+
+- name: Record a collection failure without inventing data
+  # A device that did not answer must NOT receive a bc_facts dict full of
+  # empty defaults, because every check would then evaluate against those
+  # blanks and produce plausible-looking output. Setting the collection flag
+  # instead lets the orchestrator report the device as uncollected.
+  ansible.builtin.set_fact:
+    bc_collection_failed: true
+    bc_collection_error: "{{ _bc_ssh_facts.msg | default('collection failed') }}"
+  when: _bc_ssh_facts.failed | default(false)

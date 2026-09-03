@@ -1,0 +1,25 @@
+---
+# Copy to vars/baseline.yml. Consumed by playbooks/network/baseline_compliance.yml.
+
+# Minimum acceptable IOS version per platform family. Keys are matched against
+# the model string reported by ios_facts.
+baseline_min_version:
+  default: "15.2(7)E7"
+  "C9200": "17.06.05"
+  "WS-C3850": "16.12.09"
+  "WS-C2960X": "15.2(7)E7"
+
+# Configuration lines that must be present on every device.
+baseline_required_config:
+  - "service password-encryption"
+  - "no ip http server"
+  - "logging buffered 32768"
+
+# Configuration lines that must NOT be present.
+baseline_forbidden_config:
+  - "ip http server"
+  - "no service password-encryption"
+
+# Contact string applied by the remediation path. Use a role mailbox, never a
+# named individual -- this ends up in SNMP responses.
+baseline_snmp_contact: "netops@example.com"
