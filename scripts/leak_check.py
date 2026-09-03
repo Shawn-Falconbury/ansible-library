@@ -128,6 +128,7 @@ ALLOWED_MAC_PREFIXES = (
 
 ALLOWED_EXACT_DOMAINS = {
     "github.com",
+    "api.github.com",
     "raw.githubusercontent.com",
     "galaxy.ansible.com",
     "docs.ansible.com",
