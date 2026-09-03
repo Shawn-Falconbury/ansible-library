@@ -88,6 +88,11 @@ ansible-playbook -i localhost, tests/test_baseline_logic.yml >/tmp/fx.txt 2>&1
 verdict $?
 grep -E 'All [0-9]+ assertions|Divergent' /tmp/fx.txt | head -3
 
+note "job: syntax -> report masking test"
+ansible-playbook -i localhost, tests/test_report_masking.yml >/tmp/mk.txt 2>&1
+verdict $?
+grep -E 'fixture value|LEAK' /tmp/mk.txt | tail -2
+
 note "job: syntax -> install pinned collections"
 ansible-galaxy collection install -r requirements.yml >/tmp/gx.txt 2>&1
 verdict $?

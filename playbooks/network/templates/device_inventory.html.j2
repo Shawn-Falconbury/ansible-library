@@ -1,0 +1,143 @@
+{#-
+  device_inventory.html.j2
+
+  Rendered TWICE from the same data by playbooks/network/device_inventory.yml:
+
+    report_mask: true    -> the distribution copy, addresses masked
+    report_mask: false   -> the archive copy, mode 0600, full addresses
+
+  ONE TEMPLATE, NOT TWO. Separate masked and unmasked templates are guaranteed
+  to drift, and the two drifts are not equally visible. A column added to the
+  archive copy and forgotten in the masked one is a MISSING COLUMN, which
+  somebody notices. A column added to the masked one without its mask is a
+  LEAK, which nobody notices. Branching inside one template means every field
+  renders through the same code path and the mask applies by construction.
+
+  INPUT: inventory_rows, a list of dicts. The template never touches hostvars
+  directly, so tests/test_report_masking.yml can drive it from fixtures with
+  no devices present.
+
+      name          str   device identifier
+      reachable     bool  false -> values omitted, never defaulted
+      model         str
+      version       str
+      mgmt_ip       str   may be empty when unreachable
+      mac           str   may be empty
+      interfaces    list  of name / status / ip
+-#}
+{%- macro addr(value) -%}
+{#- Addresses render through this macro or they do not render. mask_ip RAISES
+    on input it cannot parse rather than passing it through, so an unexpected
+    value fails the render instead of landing unmasked in a report labelled
+    masked. The empty check comes first because absence is not a parse
+    failure: an unreachable device legitimately has no address. -#}
+{%- if value is not defined or value in (none, '') -%}
+<span class="na">&mdash;</span>
+{%- elif report_mask -%}
+{{ value | mask_ip }}
+{%- else -%}
+{{ value }}
+{%- endif -%}
+{%- endmacro -%}
+{%- macro hwaddr(value) -%}
+{%- if value is not defined or value in (none, '') -%}
+<span class="na">&mdash;</span>
+{%- elif report_mask -%}
+{{ value | mask_mac }}
+{%- else -%}
+{{ value }}
+{%- endif -%}
+{%- endmacro -%}
+{%- macro devname(value) -%}
+{%- if value is not defined or value in (none, '') -%}
+<span class="na">&mdash;</span>
+{%- elif report_mask -%}
+{{ value | mask_hostname }}
+{%- else -%}
+{{ value }}
+{%- endif -%}
+{%- endmacro -%}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Device Inventory</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+         font-size: 14px; color: #222; margin: 2em; }
+  h1 { font-size: 20px; margin-bottom: 0.2em; }
+  .meta { color: #666; font-size: 12px; margin-bottom: 1.5em; }
+  .banner { padding: 0.6em 0.9em; border-radius: 4px; margin-bottom: 1.5em;
+            font-size: 13px; }
+  .masked { background: #eef4ff; border: 1px solid #b6ccf0; }
+  .full { background: #fff4e5; border: 1px solid #e0b878; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 2em; }
+  th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: left;
+           vertical-align: top; }
+  th { background: #f4f4f4; font-weight: 600; }
+  tr.down td { background: #fdf0f0; }
+  .na { color: #999; }
+  .up { color: #1a7f37; }
+  .dn { color: #b32020; font-weight: 600; }
+  .sub { font-size: 12px; color: #555; }
+</style>
+</head>
+<body>
+
+<h1>Device Inventory</h1>
+<div class="meta">
+  Generated {{ report_generated }} UTC
+  &middot; {{ inventory_rows | length }} device(s) in scope
+  &middot; {{ inventory_rows | rejectattr('reachable') | list | length }} unreachable
+</div>
+
+{% if report_mask %}
+<div class="banner masked">
+  <strong>Masked copy.</strong> Addresses are partially redacted for
+  distribution. The unredacted copy is archived on the control node.
+</div>
+{% else %}
+<div class="banner full">
+  <strong>Unmasked copy.</strong> Contains full addresses. Do not forward.
+</div>
+{% endif %}
+
+<table>
+  <thead>
+    <tr>
+      <th>Device</th><th>Model</th><th>Version</th>
+      <th>Management address</th><th>Base MAC</th><th>Interfaces</th>
+    </tr>
+  </thead>
+  <tbody>
+{#- Unreachable rows render from the same list, flagged, with no values at
+    all. Defaulting them to 0 or 'unknown' would render as a measurement and
+    read as healthy; an em dash reads as absent. -#}
+{% for row in inventory_rows | sort(attribute='name') %}
+    <tr{% if not row.reachable %} class="down"{% endif %}>
+      <td>{{ devname(row.name) }}</td>
+{% if row.reachable %}
+      <td>{{ row.model | default('', true) }}</td>
+      <td>{{ row.version | default('', true) }}</td>
+      <td>{{ addr(row.mgmt_ip | default('', true)) }}</td>
+      <td>{{ hwaddr(row.mac | default('', true)) }}</td>
+      <td>
+{% for iface in row.interfaces | default([], true) %}
+        <div>{{ iface.name }}
+          <span class="{{ 'up' if iface.status == 'up' else 'dn' }}">{{ iface.status }}</span>
+          <span class="sub">{{ addr(iface.ip | default('', true)) }}</span>
+        </div>
+{% else %}
+        <span class="na">&mdash;</span>
+{% endfor %}
+      </td>
+{% else %}
+      <td colspan="5" class="dn">unreachable &mdash; no session established, nothing collected</td>
+{% endif %}
+    </tr>
+{% endfor %}
+  </tbody>
+</table>
+
+</body>
+</html>

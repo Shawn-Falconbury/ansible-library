@@ -1,0 +1,43 @@
+---
+# Fixture rows for tests/test_report_masking.yml.
+#
+# Addresses here are RFC 5737 documentation ranges and MACs are RFC 7042, so
+# the fixture itself is publishable. The test does not check that these exact
+# values are hidden -- it checks that whatever went in does not come out of the
+# masked render, which is the property that matters regardless of the input.
+
+inventory_rows_fixture:
+  - name: sw-a-access-01.site.example
+    reachable: true
+    model: WS-C2960X-48FPS-L
+    version: 15.2(7)E7
+    mgmt_ip: 192.0.2.11
+    mac: 00:00:5e:00:53:a1
+    interfaces:
+      - name: GigabitEthernet0/1
+        status: up
+        ip: 198.51.100.11
+      - name: GigabitEthernet0/2
+        status: down
+        ip: ''
+
+  - name: rtr-core-01.site.example
+    reachable: true
+    model: ISR4331/K9
+    version: 17.06.05
+    mgmt_ip: 203.0.113.1
+    mac: 00:00:5e:00:53:b2
+    interfaces:
+      - name: GigabitEthernet0/0/0
+        status: up
+        ip: 203.0.113.2
+
+  # Unreachable: no values at all. The template must render an absence, not a
+  # zero. See docs/gotchas.md entry 3.
+  - name: sw-b-access-01.site.example
+    reachable: false
+    model: ''
+    version: ''
+    mgmt_ip: ''
+    mac: ''
+    interfaces: []

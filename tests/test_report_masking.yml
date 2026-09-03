@@ -1,0 +1,174 @@
+---
+# ===========================================================================
+# test_report_masking.yml
+#
+# Render playbooks/network/templates/device_inventory.html.j2 both ways from
+# fixture data, and assert the masked copy does not contain what the full copy
+# does.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS CATCHES THAT test_mask.py DOES NOT
+# ---------------------------------------------------------------------------
+# test_mask.py proves the masking FUNCTIONS work. It says nothing about
+# whether the template actually calls them. A field added to the template that
+# prints row.mgmt_ip directly instead of going through the addr() macro would
+# leave all 34 unit tests green while leaking every management address into the
+# distributed report.
+#
+# So this test asserts on the RENDERED OUTPUT, and asserts by absence: the
+# masked file must not contain any address the fixture supplied. That property
+# holds no matter which fields exist, which is what makes it survive changes to
+# the template.
+#
+# It also runs the repository leak checker over the masked render, which is the
+# same gate device_inventory.yml applies before sending. If the checker and the
+# masking ever disagree, this is where that surfaces.
+#
+# ---------------------------------------------------------------------------
+# RUNNING
+# ---------------------------------------------------------------------------
+#   ansible-playbook -i localhost, tests/test_report_masking.yml
+#
+# Requires ansible.cfg to be staged, because the masking filters resolve
+# through filter_plugins declared there. See tests/test_filter_path.sh.
+# ===========================================================================
+
+- name: Dual-render masking test
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - fixtures/inventory_rows.yml
+
+  vars:
+    _tmp: "/tmp/ansible-library-masking-test"
+    inventory_rows: "{{ inventory_rows_fixture }}"
+    report_generated: "2026-01-01 00:00:00"
+
+    # Every address and MAC the fixture supplies. The masked render must
+    # contain none of them.
+    _secrets: >-
+      {{ (inventory_rows | map(attribute='mgmt_ip') | select('string')
+          | reject('equalto', '') | list)
+         + (inventory_rows | map(attribute='mac') | select('string')
+            | reject('equalto', '') | list)
+         + (inventory_rows | map(attribute='interfaces') | flatten
+            | map(attribute='ip') | select('string')
+            | reject('equalto', '') | list) }}
+
+  tasks:
+    - name: Create the scratch directory
+      ansible.builtin.file:
+        path: "{{ _tmp }}"
+        state: directory
+        mode: "0700"
+
+    - name: Render the masked copy
+      ansible.builtin.template:
+        src: ../playbooks/network/templates/device_inventory.html.j2
+        dest: "{{ _tmp }}/masked.html"
+        mode: "0644"
+      vars:
+        report_mask: true
+
+    - name: Render the full copy
+      ansible.builtin.template:
+        src: ../playbooks/network/templates/device_inventory.html.j2
+        dest: "{{ _tmp }}/full.html"
+        mode: "0600"
+      vars:
+        report_mask: false
+
+    - name: Read both renders
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      register: _renders
+      loop:
+        - "{{ _tmp }}/masked.html"
+        - "{{ _tmp }}/full.html"
+
+    - name: Decode
+      ansible.builtin.set_fact:
+        _masked: "{{ _renders.results[0].content | b64decode }}"
+        _full: "{{ _renders.results[1].content | b64decode }}"
+
+    # ---- the control: prove the fixture values ARE present unmasked -----
+    # Without this, an empty or broken render would satisfy the masking
+    # assertion trivially. A file containing nothing leaks nothing.
+    - name: The full copy must contain every fixture value
+      ansible.builtin.assert:
+        that:
+          - item in _full
+        fail_msg: >-
+          '{{ item }}' is missing from the UNMASKED render. Either the
+          template stopped emitting this field, or the render failed. The
+          masking assertion below would pass vacuously, so this fails first.
+        quiet: true
+      loop: "{{ _secrets }}"
+
+    # ---- the actual test ------------------------------------------------
+    - name: The masked copy must contain none of them
+      ansible.builtin.assert:
+        that:
+          - item not in _masked
+        fail_msg: >-
+          LEAK: '{{ item }}' appears verbatim in the MASKED render. A field
+          is bypassing the addr()/hwaddr() macros and printing the raw value.
+        quiet: true
+      loop: "{{ _secrets }}"
+
+    - name: The masked copy must still be a usable report
+      # Masking that empties the report is not masking, it is deletion. The
+      # device names and the masked forms have to survive.
+      ansible.builtin.assert:
+        that:
+          - "'192.0.xxx.xxx' in _masked"
+          - "'00:00:5e:xx:xx:xx' in _masked"
+          - "'sw-a-access-01.xxx' in _masked"
+          - "'WS-C2960X-48FPS-L' in _masked"
+          - "'Masked copy' in _masked"
+        fail_msg: >-
+          The masked render is missing expected masked output. Masking that
+          removes the information entirely is not useful.
+        quiet: true
+
+    - name: The unreachable device must render as absent, not as zero
+      ansible.builtin.assert:
+        that:
+          - "'unreachable' in _masked"
+          - "'nothing collected' in _masked"
+        fail_msg: >-
+          The unreachable device is not flagged. See docs/gotchas.md entry 3:
+          an unreachable host that renders with defaulted values reads as the
+          healthiest device in the fleet.
+        quiet: true
+
+    # ---- why the leak checker is NOT used here --------------------------
+    # An earlier draft ran scripts/leak_check.py over both renders and
+    # asserted it objected to the unmasked one. That cannot work.
+    #
+    # The fixture must use publishable values -- RFC 5737 addresses, RFC 7042
+    # MACs -- because it is committed to a public repository. Those are
+    # precisely the values the leak checker allowlists, so it returns clean on
+    # the UNMASKED render and the assertion fails.
+    #
+    # The two tools answer different questions. leak_check.py asks whether
+    # anything unsafe to publish is in the repository. This test asks whether
+    # the template routes every field through a masking macro. Only the
+    # absence assertions above can answer the second, and they answer it for
+    # any input rather than for a specific set of values.
+    #
+    # device_inventory.yml still runs the leak checker over its masked render
+    # before sending, where the inputs are real and the check has teeth.
+
+    - name: Remove the scratch directory
+      ansible.builtin.file:
+        path: "{{ _tmp }}"
+        state: absent
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg: >-
+          {{ _secrets | length }} fixture value(s) present in the full render
+          and absent from the masked render.

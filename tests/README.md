@@ -33,6 +33,7 @@ here and fail there.
 | `test_leak_check.sh` | yes | no | The leak scanner, and the tree |
 | `test_filter_path.sh` | yes | yes | Filters reachable from a playbook |
 | `test_baseline_logic.yml` | yes | yes | Baseline evaluation, fixture-driven |
+| `test_masking.sh` | yes | yes | Dual-render masking, fixture-driven |
 | `simulate_ci.sh` | **no** | yes | Reproduces the CI jobs |
 | `test_bare_lint.sh` | **no** | yes | Reproduces CI's lint job |
 
@@ -96,6 +97,35 @@ on localhost — no device, no credentials. Ten cases, fifty assertions.
 This is what catches gotcha 6: a fixture containing formatted TimeTicks
 (`9:0:07:42.73`) proves `| int` yields `0` and that the guard forces SKIP rather
 than PASS.
+
+## `test_masking.sh`
+
+Renders `playbooks/network/templates/device_inventory.html.j2` both ways
+from `fixtures/inventory_rows.yml` and asserts that no value the fixture
+supplied appears in the masked copy.
+
+This covers a gap `test_mask.py` cannot. Those tests prove the masking
+*functions* work; they say nothing about whether the template calls them. A
+field that prints `row.mgmt_ip` directly instead of going through the
+`addr()` macro leaves all 34 unit tests green while leaking every
+management address into the distributed report. Verified by mutation: that
+exact change makes this test fail and the unit tests pass.
+
+It asserts the *full* render contains every fixture value first. Without
+that control, an empty or broken render would satisfy the masking
+assertion trivially -- a file containing nothing leaks nothing.
+
+`scripts/leak_check.py` is deliberately **not** used as the assertion here.
+The fixture must use publishable values (RFC 5737, RFC 7042) because it is
+committed to a public repository, and those are precisely the values the
+checker allowlists -- so it returns clean on the unmasked render. The two
+answer different questions: the checker asks whether anything unsafe to
+publish is in the repository, this asks whether the template routes every
+field through a masking macro.
+
+The wrapper exists because the test needs `ansible.cfg` staged to resolve
+the masking filters, and `ansible.cfg` is gitignored. It stages one, runs
+the playbook, and restores whatever was there before.
 
 ## `simulate_ci.sh`
 

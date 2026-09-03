@@ -49,6 +49,14 @@ echo "== filter plugin reachable from a playbook ====================="
 bash tests/test_filter_path.sh || FAILED=1
 
 echo
+echo "== report masking (dual-render) ================================"
+# Renders the inventory template both ways from fixtures and asserts no
+# fixture value survives into the masked copy. Distinct from the unit
+# tests: those prove the masking functions work, this proves the template
+# actually calls them.
+bash tests/test_masking.sh || FAILED=1
+
+echo
 echo "== baseline evaluation logic (fixture-driven) =================="
 # Explicit inventory. Running against the project inventory risks picking up
 # group_vars that set ansible_connection, which outranks the play-level
