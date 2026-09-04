@@ -133,3 +133,48 @@ jobs:
           done < <(find playbooks -name '*.yml' -type f \
                      -not -path 'playbooks/*/tasks/*' | sort)
           exit $rc
+  wiki:
+    name: wiki build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Wiki build is current
+        # The wiki is generated from docs/gotchas.md and wiki/. If the two
+        # diverge, the wiki keeps serving stale text while still looking like
+        # a maintained source -- the documentation form of a scanner that has
+        # silently stopped matching. --check fails and names the pages.
+        run: python3 scripts/build_wiki.py --check
+
+      - name: Leak check the built wiki
+        # build/wiki is inside the tree, so the leak-check job already covers
+        # the committed copy. This catches a generated page that would leak
+        # before it is committed, on a branch where build/ was not rebuilt.
+        run: |
+          python3 scripts/build_wiki.py --out /tmp/wiki
+          python3 scripts/leak_check.py /tmp/wiki
+
+      - name: Internal wiki links resolve
+        # A broken wiki link is invisible in review and 404s only for readers.
+        run: |
+          python3 - <<'PY'
+          import re, pathlib, sys
+          d = pathlib.Path("build/wiki")
+          pages = {p.stem for p in d.glob("*.md")}
+          bad = []
+          for p in sorted(d.glob("*.md")):
+              for m in re.finditer(r'\]\((?!https?://|#)([^)]+)\)', p.read_text()):
+                  target = m.group(1).split("#")[0]
+                  if target and target not in pages:
+                      bad.append(f"{p.name} -> {target}")
+          if bad:
+              print("broken wiki links:")
+              for b in bad:
+                  print(" ", b)
+              sys.exit(1)
+          print(f"ok: {len(pages)} pages, all internal links resolve")
+          PY

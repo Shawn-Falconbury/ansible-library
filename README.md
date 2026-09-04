@@ -19,6 +19,12 @@ If you are looking for the single most useful file, it is
 **[docs/gotchas.md](docs/gotchas.md)** — the collected failure modes, each one
 of which cost real debugging time to find.
 
+The same catalogue is browsable one entry per page, cross-linked and grouped
+by category, in the
+**[wiki](https://github.com/Shawn-Falconbury/ansible-library/wiki)**. The wiki
+is generated from this repository by `scripts/build_wiki.py`; CI fails if the
+two diverge. Edit the repository, not the wiki.
+
 ## What do you want to do?
 
 | Goal | Playbook |
