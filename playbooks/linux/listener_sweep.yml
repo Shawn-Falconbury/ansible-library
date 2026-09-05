@@ -212,12 +212,12 @@
       delegate_to: localhost
       ansible.builtin.debug:
         msg:
-          - "Hosts in scope:  {{ host_rows | length }}"
-          - "Swept:           {{ host_rows | selectattr('reachable') | list | length }}"
-          - "Not swept:       {{ host_rows | rejectattr('reachable') | list | length }}"
-          - "Checks PASS:     {{ host_row_counts.PASS }}"
-          - "Checks FAIL:     {{ host_row_counts.FAIL }}"
-          - "Checks SKIP:     {{ host_row_counts.SKIP }}  (unevaluated, not clean)"
+          - "Hosts in scope:  {{ host_rows_list | length }}"
+          - "Swept:           {{ host_rows_list | selectattr('reachable') | list | length }}"
+          - "Not swept:       {{ host_rows_list | rejectattr('reachable') | list | length }}"
+          - "Checks PASS:     {{ host_rows_counts.PASS }}"
+          - "Checks FAIL:     {{ host_rows_counts.FAIL }}"
+          - "Checks SKIP:     {{ host_rows_counts.SKIP }}  (unevaluated, not clean)"
           - "Distribution:    {{ _ls_masked_path }} (0640, masked)"
           - "Archive:         {{ _ls_full_path }} (0600, full)"
 
@@ -228,9 +228,9 @@
       # artefact is much harder to triage.
       ansible.builtin.assert:
         that:
-          - host_row_counts.SKIP | int == 0
+          - host_rows_counts.SKIP | int == 0
         fail_msg: >-
-          {{ host_row_counts.SKIP }} check(s) could not be evaluated and were NOT
+          {{ host_rows_counts.SKIP }} check(s) could not be evaluated and were NOT
           counted as clean. See the UNEVALUATED section of
           {{ _ls_full_path }}.
         success_msg: "Every check produced a verdict."
@@ -241,9 +241,9 @@
       delegate_to: localhost
       ansible.builtin.assert:
         that:
-          - host_row_counts.FAIL | int == 0
+          - host_rows_counts.FAIL | int == 0
         fail_msg: >-
-          {{ host_row_counts.FAIL }} check(s) failed. See the FAILED section of
+          {{ host_rows_counts.FAIL }} check(s) failed. See the FAILED section of
           {{ _ls_full_path }}.
         success_msg: "Every evaluated check passed."
       when: listener_fail_on_fail | bool

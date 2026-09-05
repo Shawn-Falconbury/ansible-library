@@ -266,7 +266,7 @@
           {{ _sh_counts.PASS }} healthy
         body: "{{ lookup('ansible.builtin.file', _sh_masked_path) }}"
       vars:
-        _sh_counts: "{{ host_row_counts }}"
+        _sh_counts: "{{ host_rows_counts }}"
       # Bound to the toggle, not hardcoded. A hardcoded no_log censors the
       # error text too, which makes a relay authentication failure
       # undebuggable. Paired with ignore_errors and the assert below so the
@@ -296,12 +296,12 @@
       delegate_to: localhost
       ansible.builtin.debug:
         msg:
-          - "Hosts in scope:  {{ host_rows | length }}"
-          - "Collected:       {{ host_rows | selectattr('reachable') | list | length }}"
-          - "Not collected:   {{ host_rows | rejectattr('reachable') | list | length }}"
-          - "Checks PASS:     {{ host_row_counts.PASS }}"
-          - "Checks FAIL:     {{ host_row_counts.FAIL }}"
-          - "Checks SKIP:     {{ host_row_counts.SKIP }}  (unevaluated, not healthy)"
+          - "Hosts in scope:  {{ host_rows_list | length }}"
+          - "Collected:       {{ host_rows_list | selectattr('reachable') | list | length }}"
+          - "Not collected:   {{ host_rows_list | rejectattr('reachable') | list | length }}"
+          - "Checks PASS:     {{ host_rows_counts.PASS }}"
+          - "Checks FAIL:     {{ host_rows_counts.FAIL }}"
+          - "Checks SKIP:     {{ host_rows_counts.SKIP }}  (unevaluated, not healthy)"
           - "Distribution:    {{ _sh_masked_path }} (0640, masked)"
           - "Archive:         {{ _sh_full_path }} (0600, full)"
 
@@ -316,9 +316,9 @@
       # a pass, so treating it as one is exactly the mistake in entry 16.
       ansible.builtin.assert:
         that:
-          - host_row_counts.SKIP | int == 0
+          - host_rows_counts.SKIP | int == 0
         fail_msg: >-
-          {{ host_row_counts.SKIP }} check(s) could not be evaluated and
+          {{ host_rows_counts.SKIP }} check(s) could not be evaluated and
           were NOT counted as healthy:
           {{ host_rows_skipped | join('; ') }}
         success_msg: "Every check produced a verdict."
@@ -329,9 +329,9 @@
       delegate_to: localhost
       ansible.builtin.assert:
         that:
-          - host_row_counts.FAIL | int == 0
+          - host_rows_counts.FAIL | int == 0
         fail_msg: >-
-          {{ host_row_counts.FAIL }} check(s) failed:
+          {{ host_rows_counts.FAIL }} check(s) failed:
           {{ host_rows_failed | join('; ') }}
         success_msg: "Every evaluated check passed."
       when: health_fail_on_fail | bool

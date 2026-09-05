@@ -1,6 +1,6 @@
 ---
 # ===========================================================================
-# roles/host_rows
+# roles/host_rows_list
 #
 # Turn per-host check results into the row list every report template in this
 # repository consumes, plus the counts and detail the playbooks assert on.
@@ -60,8 +60,8 @@
 # ---------------------------------------------------------------------------
 # OUTPUT
 # ---------------------------------------------------------------------------
-#   host_rows           one dict per host in host_rows_targeted
-#   host_row_counts     {PASS, FAIL, SKIP} across every check in the fleet
+#   host_rows_list           one dict per host in host_rows_targeted
+#   host_rows_counts     {PASS, FAIL, SKIP} across every check in the fleet
 #   host_rows_skipped   list of "host :: check" for every SKIP
 #   host_rows_failed    list of "host :: check" for every FAIL
 #
@@ -70,7 +70,7 @@
 # flat strings with the host name already baked in, so rendering them would
 # bypass a masking macro entirely. That leak happened once already, in
 # service_health.txt.j2. Templates derive their summary sections from
-# host_rows.
+# host_rows_list.
 #
 # ---------------------------------------------------------------------------
 # THE RULE
@@ -108,13 +108,13 @@
   # this role in one process would otherwise append to the previous pass and
   # silently double the report.
   ansible.builtin.set_fact:
-    host_rows: []
+    host_rows_list: []
     host_rows_skipped: []
     host_rows_failed: []
 
 - name: Build one row per targeted host
   ansible.builtin.set_fact:
-    host_rows: "{{ host_rows + [_hr_row] }}"
+    host_rows_list: "{{ host_rows_list + [_hr_row] }}"
   loop: "{{ host_rows_targeted }}"
   loop_control:
     loop_var: _hr_host
@@ -160,14 +160,14 @@
   # indistinguishable from a small fleet.
   ansible.builtin.assert:
     that:
-      - host_rows | length == host_rows_targeted | length
-      - (host_rows | map(attribute='name') | list | sort) == (host_rows_targeted | list | sort)
+      - host_rows_list | length == host_rows_targeted | length
+      - (host_rows_list | map(attribute='name') | list | sort) == (host_rows_targeted | list | sort)
     fail_msg: >-
       Row assembly dropped hosts. Targeted {{ host_rows_targeted | length }},
-      produced {{ host_rows | length }}. Missing:
-      {{ host_rows_targeted | difference(host_rows | map(attribute='name') | list) | join(', ') }}
+      produced {{ host_rows_list | length }}. Missing:
+      {{ host_rows_targeted | difference(host_rows_list | map(attribute='name') | list) | join(', ') }}
     success_msg: >-
-      {{ host_rows | length }} row(s) for {{ host_rows_targeted | length }}
+      {{ host_rows_list | length }} row(s) for {{ host_rows_targeted | length }}
       targeted host(s).
 
 - name: Collect the SKIP and FAIL detail
@@ -186,14 +186,14 @@
          + (_hr_row.checks | selectattr('status', 'eq', 'FAIL')
             | map(attribute='check')
             | map('regex_replace', '^', _hr_row.name ~ ' :: ') | list) }}
-  loop: "{{ host_rows }}"
+  loop: "{{ host_rows_list }}"
   loop_control:
     loop_var: _hr_row
     label: "{{ _hr_row.name }}"
 
 - name: Count check outcomes across the fleet
   ansible.builtin.set_fact:
-    host_row_counts:
+    host_rows_counts:
       PASS: "{{ _hr_all | selectattr('status', 'eq', 'PASS') | list | length }}"
       FAIL: "{{ _hr_all | selectattr('status', 'eq', 'FAIL') | list | length }}"
       # An uncollected host contributes a SKIP even though it produced no
@@ -202,6 +202,6 @@
       # up from the row list.
       SKIP: >-
         {{ (_hr_all | selectattr('status', 'eq', 'SKIP') | list | length)
-           + (host_rows | rejectattr('reachable') | list | length) }}
+           + (host_rows_list | rejectattr('reachable') | list | length) }}
   vars:
-    _hr_all: "{{ host_rows | map(attribute='checks') | flatten }}"
+    _hr_all: "{{ host_rows_list | map(attribute='checks') | flatten }}"

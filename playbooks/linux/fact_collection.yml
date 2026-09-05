@@ -213,21 +213,21 @@
       vars:
         _fc_body:
           generated: "{{ '%Y-%m-%dT%H:%M:%SZ' | strftime }}"
-          hosts_in_scope: "{{ host_rows | length }}"
-          counts: "{{ host_row_counts }}"
-          hosts: "{{ host_rows }}"
+          hosts_in_scope: "{{ host_rows_list | length }}"
+          counts: "{{ host_rows_counts }}"
+          hosts: "{{ host_rows_list }}"
 
     - name: Summarise to stdout
       run_once: true
       delegate_to: localhost
       ansible.builtin.debug:
         msg:
-          - "Hosts in scope:  {{ host_rows | length }}"
-          - "Archived now:    {{ host_rows | selectattr('reachable') | list | length }}"
-          - "Not collected:   {{ host_rows | rejectattr('reachable') | list | length }}"
-          - "Checks PASS:     {{ host_row_counts.PASS }}"
-          - "Checks FAIL:     {{ host_row_counts.FAIL }}  (includes stale archives)"
-          - "Checks SKIP:     {{ host_row_counts.SKIP }}"
+          - "Hosts in scope:  {{ host_rows_list | length }}"
+          - "Archived now:    {{ host_rows_list | selectattr('reachable') | list | length }}"
+          - "Not collected:   {{ host_rows_list | rejectattr('reachable') | list | length }}"
+          - "Checks PASS:     {{ host_rows_counts.PASS }}"
+          - "Checks FAIL:     {{ host_rows_counts.FAIL }}  (includes stale archives)"
+          - "Checks SKIP:     {{ host_rows_counts.SKIP }}"
           - "Manifest:        {{ _fc_manifest }}"
 
     - name: Fail on stale or unevaluated archives
@@ -238,10 +238,10 @@
       # triage, and here the artefact is the thing that says what went wrong.
       ansible.builtin.assert:
         that:
-          - host_row_counts.FAIL | int == 0
-          - host_row_counts.SKIP | int == 0
+          - host_rows_counts.FAIL | int == 0
+          - host_rows_counts.SKIP | int == 0
         fail_msg: >-
-          {{ host_row_counts.FAIL }} stale or failed and {{ host_row_counts.SKIP }}
+          {{ host_rows_counts.FAIL }} stale or failed and {{ host_rows_counts.SKIP }}
           unevaluated. Files for those hosts are still on disk and will read
           as current to anything that does not check {{ _fc_manifest }}.
         success_msg: "Every archive in scope was rewritten this run."

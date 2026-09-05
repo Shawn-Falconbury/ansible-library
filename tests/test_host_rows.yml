@@ -2,7 +2,7 @@
 # ===========================================================================
 # test_host_rows.yml
 #
-# Drive roles/host_rows against fixture hosts and assert that a host which
+# Drive roles/host_rows_list against fixture hosts and assert that a host which
 # produced no results still produces a row.
 #
 # ---------------------------------------------------------------------------
@@ -111,11 +111,11 @@
       # in a report somebody trusts.
       ansible.builtin.assert:
         that:
-          - host_rows | length == 4
-          - (host_rows | map(attribute='name') | list | sort) == (_hr_targeted | sort)
+          - host_rows_list | length == 4
+          - (host_rows_list | map(attribute='name') | list | sort) == (_hr_targeted | sort)
         fail_msg: >-
-          Expected one row per targeted host. Got {{ host_rows | length }}:
-          {{ host_rows | map(attribute='name') | join(', ') }}
+          Expected one row per targeted host. Got {{ host_rows_list | length }}:
+          {{ host_rows_list | map(attribute='name') | join(', ') }}
         success_msg: "4 rows for 4 targeted hosts."
 
     - name: The collected host kept its checks and verdict
@@ -128,7 +128,7 @@
         success_msg: "Collected host round-tripped intact."
       vars:
         _hr_row: >-
-          {{ host_rows | selectattr('name', 'eq', 'collected-01.site.example') | first }}
+          {{ host_rows_list | selectattr('name', 'eq', 'collected-01.site.example') | first }}
 
     - name: Hosts with no results are marked unreachable and carry absence
       # docs/gotchas.md entries 3 and 16, asserted directly. An empty check
@@ -149,7 +149,7 @@
         loop_var: _hr_name
         label: "{{ _hr_name }}"
       vars:
-        _hr_row: "{{ host_rows | selectattr('name', 'eq', _hr_name) | first }}"
+        _hr_row: "{{ host_rows_list | selectattr('name', 'eq', _hr_name) | first }}"
 
     - name: Uncollected hosts contribute a SKIP to the totals
       # Counting only the checks that exist would let a host nobody reached
@@ -157,14 +157,14 @@
       # row list. One SKIP from the fixture check, two from the dead hosts.
       ansible.builtin.assert:
         that:
-          - host_row_counts.PASS | int == 1
-          - host_row_counts.FAIL | int == 0
+          - host_rows_counts.PASS | int == 1
+          - host_rows_counts.FAIL | int == 0
           # One SKIP from the collected host's own checks, plus one per
           # uncollected host. A host nobody reached must not vanish from the
           # totals.
-          - host_row_counts.SKIP | int == 4
-        fail_msg: "Counts wrong: {{ host_row_counts }}"
-        success_msg: "Counts include the uncollected hosts: {{ host_row_counts }}"
+          - host_rows_counts.SKIP | int == 4
+        fail_msg: "Counts wrong: {{ host_rows_counts }}"
+        success_msg: "Counts include the uncollected hosts: {{ host_rows_counts }}"
 
     - name: The failure detail names the cause
       # "2 unevaluated" and "2 unevaluated, one refused the credential" lead
@@ -181,6 +181,6 @@
     - name: Report suite outcome
       ansible.builtin.debug:
         msg:
-          - "rows:    {{ host_rows | length }}"
-          - "counts:  {{ host_row_counts }}"
+          - "rows:    {{ host_rows_list | length }}"
+          - "counts:  {{ host_rows_counts }}"
           - "skipped: {{ host_rows_skipped | length }}"

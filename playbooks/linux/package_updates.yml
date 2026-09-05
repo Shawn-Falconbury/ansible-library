@@ -170,12 +170,12 @@
       delegate_to: localhost
       ansible.builtin.debug:
         msg:
-          - "Hosts in scope:  {{ host_rows | length }}"
-          - "Processed:       {{ host_rows | selectattr('reachable') | list | length }}"
-          - "Not processed:   {{ host_rows | rejectattr('reachable') | list | length }}"
-          - "Checks PASS:     {{ host_row_counts.PASS }}"
-          - "Checks FAIL:     {{ host_row_counts.FAIL }}"
-          - "Checks SKIP:     {{ host_row_counts.SKIP }}  (unevaluated, not up to date)"
+          - "Hosts in scope:  {{ host_rows_list | length }}"
+          - "Processed:       {{ host_rows_list | selectattr('reachable') | list | length }}"
+          - "Not processed:   {{ host_rows_list | rejectattr('reachable') | list | length }}"
+          - "Checks PASS:     {{ host_rows_counts.PASS }}"
+          - "Checks FAIL:     {{ host_rows_counts.FAIL }}"
+          - "Checks SKIP:     {{ host_rows_counts.SKIP }}  (unevaluated, not up to date)"
           - "Report:          {{ _up_path }} (0600, not for distribution)"
 
     - name: Fail on unevaluated checks
@@ -183,9 +183,9 @@
       delegate_to: localhost
       ansible.builtin.assert:
         that:
-          - host_row_counts.SKIP | int == 0
+          - host_rows_counts.SKIP | int == 0
         fail_msg: >-
-          {{ host_row_counts.SKIP }} check(s) could not be evaluated and were NOT
+          {{ host_rows_counts.SKIP }} check(s) could not be evaluated and were NOT
           counted as up to date. See {{ _up_path }}.
         success_msg: "Every check produced a verdict."
       when: updates_fail_on_skip | bool
@@ -195,8 +195,8 @@
       delegate_to: localhost
       ansible.builtin.assert:
         that:
-          - host_row_counts.FAIL | int == 0
+          - host_rows_counts.FAIL | int == 0
         fail_msg: >-
-          {{ host_row_counts.FAIL }} check(s) failed. See {{ _up_path }}.
+          {{ host_rows_counts.FAIL }} check(s) failed. See {{ _up_path }}.
         success_msg: "Every evaluated check passed."
       when: updates_fail_on_fail | bool

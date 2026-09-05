@@ -26,8 +26,8 @@ Produces:
 
 | Variable | Contents |
 |---|---|
-| `host_rows` | one dict per targeted host: `name`, `reachable`, `verdict`, `checks`, and `reason` when unreachable |
-| `host_row_counts` | `{PASS, FAIL, SKIP}` across every check in the fleet |
+| `host_rows_list` | one dict per targeted host: `name`, `reachable`, `verdict`, `checks`, and `reason` when unreachable |
+| `host_rows_counts` | `{PASS, FAIL, SKIP}` across every check in the fleet |
 | `host_rows_skipped` | `"host :: check"` per SKIP, for assert messages |
 | `host_rows_failed` | `"host :: check"` per FAIL, for assert messages |
 
@@ -55,7 +55,7 @@ Rendering them in a template bypasses the masking macros entirely, because
 there is no field left to mask — the name is already inside the string. That
 leak happened once here, in `service_health.txt.j2`, and it looked correct
 because the per-host rows above it masked properly. Templates derive their
-summary sections from `host_rows`.
+summary sections from `host_rows_list`.
 
 ## Requires a staged ansible.cfg
 

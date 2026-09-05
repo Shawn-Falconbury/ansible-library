@@ -9,7 +9,7 @@
   file to be forwarded. Compare listener_report.txt.j2, which does dual-
   render because a masked socket sweep is genuinely useful to circulate.
 
-  INPUT: host_rows -- see tasks/build_host_rows.yml.
+  INPUT: host_rows_list -- see tasks/build_host_rows.yml.
 -#}
 ================================================================================
 PACKAGE UPDATE RUN
@@ -19,18 +19,18 @@ UNMASKED. Contains hostnames and outstanding package versions. Do not forward.
 ================================================================================
 
 SUMMARY
-  Hosts in scope    {{ host_rows | length }}
-  Processed         {{ host_rows | selectattr('reachable') | list | length }}
-  Not processed     {{ host_rows | rejectattr('reachable') | list | length }}
+  Hosts in scope    {{ host_rows_list | length }}
+  Processed         {{ host_rows_list | selectattr('reachable') | list | length }}
+  Not processed     {{ host_rows_list | rejectattr('reachable') | list | length }}
 
-  Checks PASS       {{ host_row_counts.PASS }}
-  Checks FAIL       {{ host_row_counts.FAIL }}
-  Checks SKIP       {{ host_row_counts.SKIP }}
+  Checks PASS       {{ host_rows_counts.PASS }}
+  Checks FAIL       {{ host_rows_counts.FAIL }}
+  Checks SKIP       {{ host_rows_counts.SKIP }}
 
   A SKIP is NOT a pass. The upgrade was not attempted on that host, so its
   package state is unknown rather than current.
 
-{% for row in host_rows | sort(attribute='name') %}
+{% for row in host_rows_list | sort(attribute='name') %}
 --------------------------------------------------------------------------------
 {{ row.name }}  [{{ row.verdict }}]
 {% if not row.reachable %}
