@@ -1,0 +1,142 @@
+---
+# ===========================================================================
+# tasks/evaluate_fact_archive.yml
+#
+# Decide whether this host's archived facts are current, stale, or absent.
+# Produces lx_results and lx_verdict.
+#
+# No host access. Every input arrives in lx_facts.
+#
+# ---------------------------------------------------------------------------
+# A STALE ARCHIVE IS THE DANGEROUS OUTCOME
+# ---------------------------------------------------------------------------
+# The archive exists to be consumed -- as an inventory source, by a report,
+# by whatever reads the directory next. That consumer opens a file and gets
+# well-formed JSON.
+#
+# When a host fails to answer, the naive implementation simply does not
+# rewrite its file. The old one stays. It parses, it has every expected key,
+# and there is nothing in it or in the directory listing that distinguishes
+# "collected two minutes ago" from "collected in March and nobody noticed".
+# The consumer reads a plausible description of a machine that may no longer
+# exist in that shape.
+#
+# This is worse than a missing file. A missing file raises; a stale file is
+# believed. So a host that failed collection while holding an archive is a
+# FAIL, named, with the age stated -- not a silent no-op.
+#
+# ---------------------------------------------------------------------------
+# INPUT: lx_facts
+# ---------------------------------------------------------------------------
+#   name                 str   Host identifier.
+#   collected            bool  Whether facts were gathered this run.
+#   archive_exists       bool  Whether a file is already on disk.
+#   archive_mtime_epoch  str   Its mtime, RAW. Empty when absent.
+#   now_epoch            str   Control node clock at run time, RAW.
+#   max_age_hours        int   Age above which an archive is stale.
+#
+# Both epochs are strings for the same reason as everywhere else in this
+# repository: the guard has to inspect the text before trusting it.
+# See docs/gotchas.md entry 6.
+#
+# ---------------------------------------------------------------------------
+# OUTPUT: lx_results / lx_verdict
+# ---------------------------------------------------------------------------
+# Checks: collection, archive_freshness
+# ===========================================================================
+
+- name: Reset per-host evaluation state
+  ansible.builtin.set_fact:
+    lx_results: []
+
+- name: Evaluate whether facts were gathered
+  ansible.builtin.set_fact:
+    lx_results: "{{ lx_results + [_fa_row] }}"
+  vars:
+    _fa_row: >-
+      {{
+        {
+          'check': 'collection',
+          'status': 'PASS',
+          'expected': 'facts gathered',
+          'actual': 'gathered',
+          'reason': ''
+        }
+        if lx_facts.collected | default(false) | bool else
+        {
+          'check': 'collection',
+          'status': 'FAIL',
+          'expected': 'facts gathered',
+          'actual': 'not gathered',
+          'reason': 'this host did not produce facts on this run'
+        }
+      }}
+
+- name: Evaluate archive freshness
+  ansible.builtin.set_fact:
+    lx_results: "{{ lx_results + [_fa_row] }}"
+  vars:
+    _fa_mtime: "{{ lx_facts.archive_mtime_epoch | default('') | string }}"
+    _fa_now: "{{ lx_facts.now_epoch | default('') | string }}"
+    _fa_max: "{{ lx_facts.max_age_hours | default(24) | int }}"
+
+    # The guard. An empty or non-numeric mtime becomes 0 under `| int`, and
+    # 0 produces an age of roughly twenty thousand days -- a specific,
+    # confident, entirely invented number that reads as a finding rather than
+    # as a failure to measure.
+    _fa_numeric: >-
+      {{ _fa_mtime is match('^[0-9]+$') and _fa_now is match('^[0-9]+$') }}
+
+    # Floor. An archive 23.9 hours old is 23 hours old; rounding up would
+    # trip a 24-hour threshold a day early.
+    _fa_age_h: >-
+      {{ (((_fa_now | int) - (_fa_mtime | int)) / 3600) | round(0, 'floor') | int }}
+
+    _fa_row: >-
+      {{
+        {
+          'check': 'archive_freshness',
+          'status': 'PASS',
+          'expected': 'archive rewritten this run',
+          'actual': 'current',
+          'reason': ''
+        }
+        if lx_facts.collected | default(false) | bool else (
+        {
+          'check': 'archive_freshness',
+          'status': 'SKIP',
+          'expected': 'a current archive',
+          'actual': 'no archive at all',
+          'reason': 'collection failed and this host has never been archived.
+                     Nothing on disk can mislead a consumer, so this is the
+                     benign version of the failure -- but the host is still
+                     unrecorded.'
+        }
+        if not (lx_facts.archive_exists | default(false) | bool) else (
+        {
+          'check': 'archive_freshness',
+          'status': 'SKIP',
+          'expected': 'a readable mtime',
+          'actual': 'unreadable',
+          'reason': 'an archive exists but its age could not be determined,
+                     so whether it is stale is unknown. Treat it as stale.'
+        }
+        if not (_fa_numeric | bool) else
+        {
+          'check': 'archive_freshness',
+          'status': 'FAIL',
+          'expected': 'archive rewritten this run',
+          'actual': 'stale, ' ~ (_fa_age_h | string) ~ 'h old',
+          'reason': 'collection failed and the PREVIOUS archive is still on
+                     disk. It parses, it has every expected key, and nothing
+                     in it says it is old. A consumer reading this directory
+                     will believe it.'
+        }))
+      }}
+
+- name: Summarise host verdict
+  ansible.builtin.set_fact:
+    lx_verdict: >-
+      {{ 'FAIL' if lx_results | selectattr('status', 'eq', 'FAIL') | list | length > 0
+         else ('SKIP' if lx_results | selectattr('status', 'eq', 'SKIP') | list | length > 0
+               else 'PASS') }}

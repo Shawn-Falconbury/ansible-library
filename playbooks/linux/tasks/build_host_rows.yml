@@ -1,0 +1,131 @@
+---
+# ===========================================================================
+# tasks/build_host_rows.yml
+#
+# Turn per-host lx_results into the row list the Linux report templates
+# consume, plus the counts the playbooks assert on.
+#
+# SHARED BY ALL THREE PLAYBOOKS IN THIS DIRECTORY. That is the point: the
+# skeleton below -- iterate every targeted host, mark the ones that produced
+# nothing, refuse to drop any -- is identical for fact_collection,
+# package_updates and listener_sweep. Three copies would drift, and the drift
+# would land in the unreachable-host path, which is the one nobody exercises.
+#
+# It works for all three because all three evaluation files emit the SAME
+# contract: lx_results (list of check dicts) and lx_verdict. Adopting one
+# status vocabulary across the group is what makes one row builder and one
+# test harness possible.
+#
+# INPUT
+#   _lx_hosts_all   hostnames the play targeted, INCLUDING any that went
+#                   unreachable during collection
+#   hostvars[h].lx_results / lx_verdict
+#                   set by tasks/evaluate_*.yml on hosts that answered
+#   hostvars[h].lx_collection_failed / lx_collection_error
+#                   set when a host answered but collection failed anyway
+#
+# OUTPUT
+#   lx_rows         one dict per host in _lx_hosts_all
+#   lx_counts       {PASS, FAIL, SKIP} across every check in the fleet
+#
+# ---------------------------------------------------------------------------
+# THE RULE
+# ---------------------------------------------------------------------------
+# Iterate _lx_hosts_all. Never ansible_play_hosts, never hostvars.
+#
+# Unreachable hosts are gone from ansible_play_hosts by the time this runs. A
+# list built from the survivors is internally consistent, correctly
+# formatted, and missing exactly the hosts somebody needed to know about --
+# and their absence reads as a smaller fleet, not an outage.
+# See docs/gotchas.md entry 2.
+#
+# A host that produced no results is NOT given zero counts. It gets
+# reachable: false, an empty check list, and it contributes a SKIP to the
+# totals, because an uncollected host is unevaluated rather than healthy.
+# See entries 3 and 16.
+#
+# NOTE: playbooks/reporting/tasks/build_health_rows.yml is the same shape
+# against a different variable prefix. Merging the two means parameterising
+# over variable names, which trades duplication for indirection; left as a
+# deliberate open question rather than done quietly.
+# ===========================================================================
+
+- name: Start from an empty row list
+  # Explicit rather than `| default([])` inside the accumulator. Re-running
+  # this file in one process would otherwise append to the previous pass and
+  # silently double the report.
+  ansible.builtin.set_fact:
+    lx_rows: []
+
+- name: Build one row per targeted host
+  ansible.builtin.set_fact:
+    lx_rows: "{{ lx_rows + [_lx_row] }}"
+  loop: "{{ _lx_hosts_all }}"
+  loop_control:
+    loop_var: _lx_host
+    label: "{{ _lx_host }}"
+  vars:
+    _lx_hv: "{{ hostvars[_lx_host] | default({}) }}"
+
+    # Decided once. Inlining this into the row expression would put the
+    # definition of "collected" in three places inside one Jinja expression,
+    # and they would stop agreeing.
+    _lx_ok: >-
+      {{ ('lx_results' in _lx_hv)
+         and not (_lx_hv.lx_collection_failed | default(false) | bool) }}
+
+    _lx_reason: >-
+      {{ _lx_hv.lx_collection_error
+         | default('no session established, nothing collected', true) }}
+
+    # Written out in full rather than merged with combine(). A merge would
+    # make the uncollected row "the collected row minus some fields", so a
+    # field added later would appear in both by default -- the wrong default.
+    _lx_row: >-
+      {{
+        {
+          'name': _lx_host,
+          'reachable': true,
+          'verdict': _lx_hv.lx_verdict | default('SKIP'),
+          'checks': _lx_hv.lx_results | default([])
+        }
+        if _lx_ok | bool else
+        {
+          'name': _lx_host,
+          'reachable': false,
+          'verdict': 'SKIP',
+          'checks': [],
+          'reason': _lx_reason
+        }
+      }}
+
+- name: Confirm every targeted host produced exactly one row
+  # The task above is a loop with a conditional inside it, which is the shape
+  # that silently drops an element. A short row list is otherwise
+  # indistinguishable from a small fleet.
+  ansible.builtin.assert:
+    that:
+      - lx_rows | length == _lx_hosts_all | length
+      - (lx_rows | map(attribute='name') | list | sort) == (_lx_hosts_all | list | sort)
+    fail_msg: >-
+      Row assembly dropped hosts. Targeted {{ _lx_hosts_all | length }},
+      produced {{ lx_rows | length }}. Missing:
+      {{ _lx_hosts_all | difference(lx_rows | map(attribute='name') | list) | join(', ') }}
+    success_msg: >-
+      {{ lx_rows | length }} row(s) for {{ _lx_hosts_all | length }}
+      targeted host(s).
+
+- name: Count check outcomes across the fleet
+  ansible.builtin.set_fact:
+    lx_counts:
+      PASS: "{{ _lx_all | selectattr('status', 'eq', 'PASS') | list | length }}"
+      FAIL: "{{ _lx_all | selectattr('status', 'eq', 'FAIL') | list | length }}"
+      # An uncollected host contributes a SKIP even though it produced no
+      # checks. Counting only the checks that exist would let a host nobody
+      # reached vanish from the totals entirely -- entry 2 again, one level
+      # up from the row list.
+      SKIP: >-
+        {{ (_lx_all | selectattr('status', 'eq', 'SKIP') | list | length)
+           + (lx_rows | rejectattr('reachable') | list | length) }}
+  vars:
+    _lx_all: "{{ lx_rows | map(attribute='checks') | flatten }}"

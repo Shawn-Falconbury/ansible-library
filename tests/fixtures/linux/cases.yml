@@ -1,0 +1,335 @@
+---
+# Fixture set for the three evaluation files in playbooks/linux/tasks/.
+#
+# Each case names the evaluation file to drive, supplies an lx_facts
+# dictionary, and states the status every check MUST return. The harness
+# asserts the exact status, so a guard that stops firing fails a specific
+# named case rather than quietly widening what passes.
+#
+# All values are synthetic. Addresses are RFC 5737 documentation ranges, so
+# the fixture itself is publishable.
+#
+# Epochs are fixed rather than computed from "now". A fixture that says
+# "now minus 40 hours" tests a different thing every day it runs, and the day
+# it starts failing tells you nothing about what changed.
+#
+#   now    1780000000
+#   -40h   1779856000
+#   -2h    1779992800
+
+linux_cases:
+
+  # =======================================================================
+  # listener_sweep -- evaluate_listeners.yml
+  # =======================================================================
+
+  # -----------------------------------------------------------------------
+  # THE CASE THIS FILE EXISTS FOR.
+  # postgres moved from loopback to every interface. Port 5432 was listening
+  # before and is listening now, so a port-only diff reports no change while
+  # the database became reachable from the whole network.
+  # -----------------------------------------------------------------------
+  - name: exposure_change_must_fail
+    evaluate: evaluate_listeners.yml
+    description: >-
+      Same proto and port, different bind address. Must FAIL as an exposure
+      change, not pass as "port still listening".
+    facts:
+      name: host-fixture-01
+      listeners_available: true
+      listeners:
+        - {proto: tcp, address: 0.0.0.0, port: "5432", process: postgres}
+      expected:
+        - {proto: tcp, address: 127.0.0.1, port: "5432"}
+    expect:
+      "exposure:tcp/127.0.0.1:5432": FAIL
+      verdict: FAIL
+
+  - name: exact_match_must_pass
+    evaluate: evaluate_listeners.yml
+    description: >-
+      Control. A guard that rejects everything is as broken as one that
+      accepts everything, and it fails in the direction that looks careful.
+    facts:
+      name: host-fixture-02
+      listeners_available: true
+      listeners:
+        - {proto: tcp, address: 127.0.0.1, port: "5432", process: postgres}
+      expected:
+        - {proto: tcp, address: 127.0.0.1, port: "5432"}
+    expect:
+      "expected:tcp/127.0.0.1:5432": PASS
+      verdict: PASS
+
+  - name: unexpected_listener_must_fail
+    evaluate: evaluate_listeners.yml
+    description: A socket with no baseline entry at all.
+    facts:
+      name: host-fixture-03
+      listeners_available: true
+      listeners:
+        - {proto: tcp, address: 0.0.0.0, port: "22", process: sshd}
+        - {proto: tcp, address: 0.0.0.0, port: "6379", process: redis}
+      expected:
+        - {proto: tcp, address: 0.0.0.0, port: "22"}
+    expect:
+      "expected:tcp/0.0.0.0:22": PASS
+      "unexpected:tcp/0.0.0.0:6379": FAIL
+      verdict: FAIL
+
+  - name: missing_listener_must_fail
+    evaluate: evaluate_listeners.yml
+    description: >-
+      Expected socket absent entirely. Distinct from an exposure change --
+      nothing is on that port at any address.
+    facts:
+      name: host-fixture-04
+      listeners_available: true
+      listeners: []
+      expected:
+        - {proto: tcp, address: 0.0.0.0, port: "22"}
+    expect:
+      "missing:tcp/0.0.0.0:22": FAIL
+      verdict: FAIL
+
+  # -----------------------------------------------------------------------
+  # ss missing or failing produces zero lines, exactly like a host with
+  # nothing listening. Collapsing the two reports a clean sweep for a host
+  # that was never examined. See docs/gotchas.md entry 8.
+  # -----------------------------------------------------------------------
+  - name: unreadable_socket_list_must_skip
+    evaluate: evaluate_listeners.yml
+    description: No socket list means no verdict, not a clean verdict.
+    facts:
+      name: host-fixture-05
+      listeners_available: false
+      listeners: []
+      expected:
+        - {proto: tcp, address: 0.0.0.0, port: "22"}
+    expect:
+      listeners: SKIP
+      verdict: SKIP
+
+  - name: no_baseline_configured_must_skip
+    evaluate: evaluate_listeners.yml
+    description: >-
+      A misspelled listener_baseline yields an empty expected set on every
+      host: nothing compared, zero findings, a clean report.
+    facts:
+      name: host-fixture-06
+      listeners_available: true
+      listeners:
+        - {proto: tcp, address: 0.0.0.0, port: "6379", process: redis}
+      expected: []
+    expect:
+      listener_baseline: SKIP
+      verdict: SKIP
+
+  # =======================================================================
+  # package_updates -- evaluate_updates.yml
+  # =======================================================================
+
+  # -----------------------------------------------------------------------
+  # THE CASE THIS SECTION EXISTS FOR.
+  # apt exited 0, the task reported changed, and two packages are still
+  # upgradable. Checking the return code alone reports this host as patched.
+  # -----------------------------------------------------------------------
+  - name: upgrade_succeeded_but_packages_remain_must_fail
+    evaluate: evaluate_updates.yml
+    description: >-
+      A successful upgrade is not an applied upgrade. The post-run read is
+      the only thing that can see this.
+    facts:
+      name: host-fixture-07
+      disk_free_mb: "4096"
+      disk_required_mb: 512
+      update_ran: true
+      upgradable_before: [openssl, libc6, curl]
+      upgradable_after: [openssl, libc6]
+      held: []
+      reboot_required: false
+    expect:
+      disk_preflight: PASS
+      updates_applied: FAIL
+      held_packages: PASS
+      reboot_required: PASS
+      verdict: FAIL
+
+  - name: clean_upgrade_must_pass
+    evaluate: evaluate_updates.yml
+    description: Control. Everything applied, nothing held, no reboot.
+    facts:
+      name: host-fixture-08
+      disk_free_mb: "4096"
+      disk_required_mb: 512
+      update_ran: true
+      upgradable_before: [curl]
+      upgradable_after: []
+      held: []
+      reboot_required: false
+    expect:
+      disk_preflight: PASS
+      updates_applied: PASS
+      held_packages: PASS
+      reboot_required: PASS
+      verdict: PASS
+
+  - name: held_packages_must_fail
+    evaluate: evaluate_updates.yml
+    description: >-
+      Held packages never update. A hold nobody recorded is indistinguishable
+      from a hold nobody knows about.
+    facts:
+      name: host-fixture-09
+      disk_free_mb: "4096"
+      disk_required_mb: 512
+      update_ran: true
+      upgradable_before: []
+      upgradable_after: []
+      held: [linux-image-amd64]
+      reboot_required: false
+    expect:
+      disk_preflight: PASS
+      updates_applied: PASS
+      held_packages: FAIL
+      reboot_required: PASS
+      verdict: FAIL
+
+  - name: reboot_required_must_fail
+    evaluate: evaluate_updates.yml
+    description: >-
+      Packages on disk are new, the running kernel is old. The host is in
+      neither state.
+    facts:
+      name: host-fixture-10
+      disk_free_mb: "4096"
+      disk_required_mb: 512
+      update_ran: true
+      upgradable_before: [linux-image-amd64]
+      upgradable_after: []
+      held: []
+      reboot_required: true
+    expect:
+      updates_applied: PASS
+      reboot_required: FAIL
+      verdict: FAIL
+
+  # -----------------------------------------------------------------------
+  # An unreadable df yields ''. Unguarded, '' | int is 0, 0 < 512 is true,
+  # and the host reports a confident "insufficient space" for a measurement
+  # that was never taken. A fabricated finding gets acted on.
+  # -----------------------------------------------------------------------
+  - name: unreadable_disk_must_skip_not_fail
+    evaluate: evaluate_updates.yml
+    description: >-
+      Free space that did not parse must SKIP, never FAIL with an invented
+      figure.
+    facts:
+      name: host-fixture-11
+      disk_free_mb: ""
+      disk_required_mb: 512
+      update_ran: false
+      upgradable_before: []
+      upgradable_after: []
+      held: []
+      reboot_required: false
+    expect:
+      disk_preflight: SKIP
+      updates_applied: SKIP
+      verdict: SKIP
+
+  - name: gated_out_must_skip
+    evaluate: evaluate_updates.yml
+    description: >-
+      Genuinely short on space. The gate FAILs, and the update checks SKIP
+      because nothing was attempted -- not PASS because nothing failed.
+    facts:
+      name: host-fixture-12
+      disk_free_mb: "64"
+      disk_required_mb: 512
+      update_ran: false
+      upgradable_before: []
+      upgradable_after: []
+      held: []
+      reboot_required: false
+    expect:
+      disk_preflight: FAIL
+      updates_applied: SKIP
+      verdict: FAIL
+
+  # =======================================================================
+  # fact_collection -- evaluate_fact_archive.yml
+  # =======================================================================
+
+  # -----------------------------------------------------------------------
+  # THE CASE THIS SECTION EXISTS FOR.
+  # The host did not answer, so its file was not rewritten. The old file is
+  # still there, still parses, still has every key. A consumer reading the
+  # directory believes it.
+  # -----------------------------------------------------------------------
+  - name: stale_archive_must_fail
+    evaluate: evaluate_fact_archive.yml
+    description: >-
+      Collection failed and a previous archive is on disk. Silence here is
+      what makes a leftover file read as current data.
+    facts:
+      name: host-fixture-13
+      collected: false
+      archive_exists: true
+      archive_mtime_epoch: "1779856000"
+      now_epoch: "1780000000"
+      max_age_hours: 24
+    expect:
+      collection: FAIL
+      archive_freshness: FAIL
+      verdict: FAIL
+
+  - name: fresh_archive_must_pass
+    evaluate: evaluate_fact_archive.yml
+    description: Control. Collected this run, archive rewritten.
+    facts:
+      name: host-fixture-14
+      collected: true
+      archive_exists: true
+      archive_mtime_epoch: "1779992800"
+      now_epoch: "1780000000"
+      max_age_hours: 24
+    expect:
+      collection: PASS
+      archive_freshness: PASS
+      verdict: PASS
+
+  - name: never_archived_must_skip
+    evaluate: evaluate_fact_archive.yml
+    description: >-
+      Collection failed and nothing is on disk. Still a failed collection,
+      but nothing can mislead a consumer -- the benign version.
+    facts:
+      name: host-fixture-15
+      collected: false
+      archive_exists: false
+      archive_mtime_epoch: ""
+      now_epoch: "1780000000"
+      max_age_hours: 24
+    expect:
+      collection: FAIL
+      archive_freshness: SKIP
+      verdict: FAIL
+
+  - name: unreadable_mtime_must_skip
+    evaluate: evaluate_fact_archive.yml
+    description: >-
+      An archive whose age will not parse. Unguarded, 0 yields an age of
+      roughly twenty thousand days -- a specific invented number that reads
+      as a finding.
+    facts:
+      name: host-fixture-16
+      collected: false
+      archive_exists: true
+      archive_mtime_epoch: "not-a-timestamp"
+      now_epoch: "1780000000"
+      max_age_hours: 24
+    expect:
+      collection: FAIL
+      archive_freshness: SKIP
+      verdict: FAIL

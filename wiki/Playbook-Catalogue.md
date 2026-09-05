@@ -71,9 +71,9 @@ organisational level rather than the code level.
 
 | Playbook | Status | Purpose |
 |---|---|---|
-| `fact_collection.yml` | 🔜 planned | Gather and archive host facts as a machine-readable inventory source. |
-| `package_updates.yml` | 🔜 planned | Apply updates with a pre-flight gate and post-update verification. |
-| `listener_sweep.yml` | 🔜 planned | Enumerate listening sockets across the fleet and diff against an expected set. |
+| `fact_collection.yml` | ✅ complete | Gather and archive host facts, plus a manifest covering every targeted host. A host that fails collection keeps its previous archive — which parses, has every key, and says nothing about being old — so the manifest names it as stale. |
+| `package_updates.yml` | ✅ complete | Apply updates behind a free-space gate, then **re-read the upgradable list** to find out whether anything was actually installed. `apt-get upgrade` exits 0 while holding packages back. |
+| `listener_sweep.yml` | ✅ complete | Enumerate listening sockets and diff against a baseline keyed on proto/**address**/port. A port-only diff reports no change when a service moves from `127.0.0.1` to `0.0.0.0`. Dual-rendered to text, leak-scanned. |
 
 Unlike the network playbooks, `ansible.builtin.ping` **is** a valid
 connectivity test here — the module is copied to the target and executed there.

@@ -1,0 +1,196 @@
+---
+# ===========================================================================
+# package_updates.yml
+#
+# Apply package updates with a pre-flight gate and a post-update
+# verification that does not trust the upgrade's own return code.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS PLAYBOOK EXISTS
+# ---------------------------------------------------------------------------
+# `apt-get upgrade` exits 0 while holding packages back. The Ansible task
+# reports changed, the play reports success, and the security update that
+# motivated the run is still not installed. Nothing in that outcome is an
+# error; the machine is simply not patched.
+#
+# So the upgradable list is read TWICE -- before the run and after -- and the
+# verdict comes from the second read. Checking the return code proves the
+# command ran. It proves nothing about the state of the machine.
+#
+# Three more things this playbook refuses to treat as success:
+#
+#   * Held or pinned packages. They will never update until the hold is
+#     released, and a hold nobody recorded is indistinguishable from a hold
+#     nobody knows about.
+#   * An outstanding reboot. Packages on disk are new, the running kernel and
+#     libraries are old, and the host is in neither state.
+#   * A host that was gated out on free space. Nothing was attempted, so
+#     nothing is known -- SKIP, not PASS. See docs/gotchas.md entry 16.
+#
+# ---------------------------------------------------------------------------
+# THE REPORT IS NOT A DISTRIBUTION ARTEFACT
+# ---------------------------------------------------------------------------
+# It lists hostnames alongside exact package versions, which together
+# describe what is exploitable on which machine. It is written once, at 0600,
+# and there is deliberately no masked copy: there is no audience for a
+# redacted version of this, and offering one would invite it to be forwarded.
+#
+# ---------------------------------------------------------------------------
+# REQUIRED CONFIGURATION
+# ---------------------------------------------------------------------------
+# Inventory groups
+#   linux_hosts    Debian-family hosts reached over SSH, with become.
+#
+# ---------------------------------------------------------------------------
+# OPTIONAL VARIABLES
+# ---------------------------------------------------------------------------
+#   updates_check_mode        Report what would change, install nothing.
+#                             Default: false. In check mode update_ran stays
+#                             false and the verdict is SKIP, not PASS.
+#   updates_min_free_mb       Pre-flight threshold. Default: 512
+#   updates_cache_path        Filesystem to measure. Default: /var/cache
+#   updates_cache_valid_time  apt cache age in seconds. Default: 3600
+#   updates_report_dir        Default: {{ report_output_dir }} or ./reports
+#   updates_fail_on_skip      Default: true
+#   updates_fail_on_fail      Default: true
+#
+# ---------------------------------------------------------------------------
+# ASSUMPTIONS
+# ---------------------------------------------------------------------------
+#   * Debian family. apt-mark and apt-get are used directly for the parts the
+#     apt module does not expose.
+#   * become is available. Without it the upgrade fails and the host is
+#     reported, not silently skipped.
+#
+# ---------------------------------------------------------------------------
+# WHAT FAILS IF MISCONFIGURED
+# ---------------------------------------------------------------------------
+#   become unavailable        The apply task fails, the host stays in the
+#                             report, and updates_applied FAILs naming the
+#                             packages still outstanding.
+#   Insufficient free space   The upgrade is SKIPped with the measurement
+#                             stated. It is not attempted and then abandoned
+#                             half-way, which is what breaks dpkg.
+#   df path does not exist    disk_preflight SKIPs as unreadable rather than
+#                             defaulting to 0 and reporting a confident FAIL.
+#   Group named incorrectly   Zero hosts, an empty report, exit 0. Guarded.
+#
+# ---------------------------------------------------------------------------
+# USAGE
+# ---------------------------------------------------------------------------
+#   ansible-playbook playbooks/linux/package_updates.yml -e updates_check_mode=true
+#   ansible-playbook playbooks/linux/package_updates.yml
+#   ansible-playbook playbooks/linux/package_updates.yml --limit linux_hosts
+# ===========================================================================
+
+- name: Apply package updates
+  hosts: linux_hosts
+  gather_facts: false
+  # No connection: keyword. ansible_connection lives in group_vars and
+  # outranks a play-level value silently. See docs/gotchas.md entry 4.
+
+  vars:
+    # Defined at PLAY level. The same expression on a task's vars: is
+    # self-referential and recurses until the template stack blows.
+    updates_min_free_mb: "{{ updates_min_free_mb | default(512) }}"
+    updates_check_mode: "{{ updates_check_mode | default(false) }}"
+
+  tasks:
+    - name: Collect and apply
+      ansible.builtin.include_tasks: tasks/collect_updates.yml
+
+    - name: Evaluate what actually happened
+      ansible.builtin.include_tasks: tasks/evaluate_updates.yml
+      when: not (lx_collection_failed | default(false))
+
+- name: Report on package updates
+  hosts: linux_hosts
+  gather_facts: false
+  strategy: linear
+
+  vars:
+    updates_report_dir: >-
+      {{ updates_report_dir | default(report_output_dir | default('./reports')) }}
+    updates_report_name: "{{ updates_report_name | default('package_updates') }}"
+    updates_fail_on_skip: "{{ updates_fail_on_skip | default(true) }}"
+    updates_fail_on_fail: "{{ updates_fail_on_fail | default(true) }}"
+
+    _up_path: "{{ updates_report_dir }}/{{ updates_report_name }}.txt"
+    _lx_hosts_all: "{{ ansible_play_hosts_all }}"
+
+  tasks:
+    - name: Guard against an empty play
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.assert:
+        that:
+          - _lx_hosts_all | length > 0
+        fail_msg: >-
+          The play matched zero hosts. Check that the inventory group
+          'linux_hosts' exists and is populated. An empty run is not a
+          passing run. See docs/gotchas.md entry 8.
+        success_msg: "{{ _lx_hosts_all | length }} host(s) in scope."
+
+    - name: Build the report rows
+      ansible.builtin.include_tasks:
+        file: tasks/build_host_rows.yml
+        apply:
+          run_once: true
+          delegate_to: localhost
+      run_once: true
+
+    - name: Ensure the report directory exists
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.file:
+        path: "{{ updates_report_dir }}"
+        state: directory
+        mode: "0750"
+
+    - name: Render the report
+      run_once: true
+      delegate_to: localhost
+      # 0600 and no masked counterpart. See the header note: hostnames plus
+      # exact outstanding versions is an exploitability map.
+      ansible.builtin.template:
+        src: update_report.txt.j2
+        dest: "{{ _up_path }}"
+        mode: "0600"
+      vars:
+        report_generated: "{{ '%Y-%m-%d %H:%M:%S' | strftime }}"
+
+    - name: Summarise to stdout
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.debug:
+        msg:
+          - "Hosts in scope:  {{ lx_rows | length }}"
+          - "Processed:       {{ lx_rows | selectattr('reachable') | list | length }}"
+          - "Not processed:   {{ lx_rows | rejectattr('reachable') | list | length }}"
+          - "Checks PASS:     {{ lx_counts.PASS }}"
+          - "Checks FAIL:     {{ lx_counts.FAIL }}"
+          - "Checks SKIP:     {{ lx_counts.SKIP }}  (unevaluated, not up to date)"
+          - "Report:          {{ _up_path }} (0600, not for distribution)"
+
+    - name: Fail on unevaluated checks
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.assert:
+        that:
+          - lx_counts.SKIP | int == 0
+        fail_msg: >-
+          {{ lx_counts.SKIP }} check(s) could not be evaluated and were NOT
+          counted as up to date. See {{ _up_path }}.
+        success_msg: "Every check produced a verdict."
+      when: updates_fail_on_skip | bool
+
+    - name: Fail on failed checks
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.assert:
+        that:
+          - lx_counts.FAIL | int == 0
+        fail_msg: >-
+          {{ lx_counts.FAIL }} check(s) failed. See {{ _up_path }}.
+        success_msg: "Every evaluated check passed."
+      when: updates_fail_on_fail | bool

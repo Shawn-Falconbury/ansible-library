@@ -1,0 +1,140 @@
+{#-
+  listener_report.txt.j2
+
+  Rendered TWICE from the same data by playbooks/linux/listener_sweep.yml:
+
+    report_mask: true    -> the distribution copy, addresses masked
+    report_mask: false   -> the archive copy, mode 0600, full addresses
+
+  ONE TEMPLATE, NOT TWO. Separate masked and unmasked templates drift, and
+  the two drifts are not equally visible: a field added to the archive copy
+  and forgotten in the masked one is a MISSING FIELD, which somebody
+  notices; a field added to the masked one without its mask is a LEAK, which
+  nobody does. Branching inside one template means every value renders
+  through the same code path and the mask applies by construction.
+
+  EVERYTHING THAT CAN CARRY AN ADDRESS GOES THROUGH addr(). That includes
+  the check name and the actual/expected fields, because this playbook bakes
+  proto/address:port into all three. A summary section rendered from
+  pre-joined strings would bypass the macro entirely -- which is exactly the
+  leak that showed up in service_health.txt.j2 and is why both the per-host
+  rows and the summary sections below iterate lx_rows.
+
+  INPUT: lx_rows, list of dicts. The template never touches hostvars, so
+  tests can drive it from fixtures with no hosts present.
+
+      name       str   host identifier
+      reachable  bool  false -> no checks at all, never zeroed counts
+      verdict    str   PASS | FAIL | SKIP
+      checks     list  of check / status / expected / actual / reason
+      reason     str   present only when reachable is false
+-#}
+{%- macro hostname(value) -%}
+{%- if value is not defined or value in (none, '') -%}
+-
+{%- elif report_mask -%}
+{{ value | mask_hostname }}
+{%- else -%}
+{{ value }}
+{%- endif -%}
+{%- endmacro -%}
+{%- macro addr(value) -%}
+{#- Socket strings are proto/address:port. mask_ip RAISES on input it cannot
+    parse, so the address is extracted and masked while the surrounding
+    structure is preserved. A wildcard bind is not an address and is left
+    alone: masking 0.0.0.0 would hide the single most important fact in the
+    report. -#}
+{%- if value is not defined or value in (none, '') -%}
+-
+{%- elif not report_mask -%}
+{{ value }}
+{%- else -%}
+{%- set parts = value.split('/') -%}
+{%- if parts | length < 2 -%}
+{{ value }}
+{%- else -%}
+{%- set rest = parts[1:] | join('/') -%}
+{%- set port = rest.split(':') | last -%}
+{%- set a = rest[:(rest | length) - (port | length) - 1] -%}
+{%- if a in ('0.0.0.0', '[::]', '*', '') -%}
+{{ parts[0] }}/{{ a }}:{{ port }}
+{%- else -%}
+{{ parts[0] }}/{{ a | mask_ip }}:{{ port }}
+{%- endif -%}
+{%- endif -%}
+{%- endif -%}
+{%- endmacro -%}
+================================================================================
+LISTENING SOCKET SWEEP
+Generated {{ report_generated }} UTC
+{% if report_mask %}
+MASKED COPY. Bind addresses are partially redacted for distribution.
+Wildcard binds are shown in full, deliberately: on this report they are the
+finding, not the detail.
+{% else %}
+UNMASKED COPY. Contains full bind addresses. Do not forward.
+{% endif %}
+================================================================================
+
+SUMMARY
+  Hosts in scope    {{ lx_rows | length }}
+  Swept             {{ lx_rows | selectattr('reachable') | list | length }}
+  Not swept         {{ lx_rows | rejectattr('reachable') | list | length }}
+
+  Checks PASS       {{ lx_counts.PASS }}
+  Checks FAIL       {{ lx_counts.FAIL }}
+  Checks SKIP       {{ lx_counts.SKIP }}
+
+  A SKIP is NOT a pass. It means the socket list could not be compared, and
+  what is listening on that host is unknown rather than approved.
+
+{% for row in lx_rows | sort(attribute='name') %}
+--------------------------------------------------------------------------------
+{{ hostname(row.name) }}  [{{ row.verdict }}]
+{% if not row.reachable %}
+  NOT SWEPT -- {{ row.reason | default('no session established') }}
+{#- No counts here. "0 unexpected listeners" for a host nobody reached
+    renders as a measurement and reads as the cleanest machine in the fleet.
+    See docs/gotchas.md entry 3. -#}
+  No socket was examined on this host. What it is listening on is unknown,
+  not approved.
+{% else %}
+{% for check in row.checks %}
+  {{ '%-6s' | format(check.status) }} {{ addr(check.check.split(':', 1)[1] | default(check.check)) }}  ({{ check.check.split(':', 1)[0] }})
+{%- if check.status != 'PASS' %}
+           expected: {{ addr(check.expected | default('')) }}
+           actual:   {{ addr(check.actual | default('')) }}
+{% if check.reason | default('') %}           reason:   {{ check.reason | trim }}
+{% endif %}
+{%- endif %}
+{% else %}
+  No checks were produced for this host.
+{% endfor %}
+{% endif %}
+{% endfor %}
+--------------------------------------------------------------------------------
+{#- Both sections below derive from lx_rows, NOT from any pre-joined summary
+    list. A flat list of "host :: finding" strings would have the name and
+    address already baked in and would bypass both macros. That exact leak
+    happened once in this repository; it is not repeated here. -#}
+{% if lx_counts.SKIP | int > 0 %}
+
+UNEVALUATED
+{% for row in lx_rows | sort(attribute='name') %}
+{% if not row.reachable %}
+  {{ hostname(row.name) }} :: host -- {{ row.reason | default('no session established') }}
+{% endif %}
+{% for check in row.checks | selectattr('status', 'eq', 'SKIP') %}
+  {{ hostname(row.name) }} :: {{ addr(check.check.split(':', 1)[1] | default(check.check)) }}
+{% endfor %}
+{% endfor %}
+{% endif %}
+{% if lx_counts.FAIL | int > 0 %}
+
+FAILED
+{% for row in lx_rows | sort(attribute='name') %}
+{% for check in row.checks | selectattr('status', 'eq', 'FAIL') %}
+  {{ hostname(row.name) }} :: {{ check.check.split(':', 1)[0] }} :: {{ addr(check.check.split(':', 1)[1] | default(check.check)) }}
+{% endfor %}
+{% endfor %}
+{% endif %}

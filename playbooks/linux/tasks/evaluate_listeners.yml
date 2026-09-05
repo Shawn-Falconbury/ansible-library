@@ -1,0 +1,212 @@
+---
+# ===========================================================================
+# tasks/evaluate_listeners.yml
+#
+# Compare observed listening sockets against the expected set.
+# Produces lx_results and lx_verdict.
+#
+# No host access. Every input arrives in lx_facts, already gathered by
+# tasks/collect_listeners.yml. That split is what lets the comparison run
+# against fixtures with nothing listening anywhere.
+#
+# ---------------------------------------------------------------------------
+# COMPARE THE BIND ADDRESS, NOT JUST THE PORT
+# ---------------------------------------------------------------------------
+# This is the entire reason the playbook exists.
+#
+# A sweep that diffs port numbers reports "no change" when a service moves
+# from 127.0.0.1:5432 to 0.0.0.0:5432. Port 5432 was listening before and is
+# listening now. Nothing in a port-only diff can see that the database just
+# became reachable from the rest of the network.
+#
+# That is the failure mode this whole repository is about: the check runs,
+# exits zero, and reports success while the thing it was watching for has
+# happened. So the comparison key is proto/address:port, and a proto+port
+# match with a different address is its own FAIL -- reported as an EXPOSURE
+# CHANGE with both addresses named, rather than as one "missing" plus one
+# "unexpected", which is the same information arranged so nobody reads it.
+#
+# ---------------------------------------------------------------------------
+# INPUT: lx_facts
+# ---------------------------------------------------------------------------
+#   name                 str   Host identifier, for reporting only.
+#   listeners_available  bool  Whether the socket list was actually read.
+#   listeners            list  of {proto, address, port, process}
+#   expected             list  of {proto, address, port}
+#
+# listeners_available is separate from an empty listeners list on purpose.
+# A host with no listening services and a host where `ss` is missing both
+# produce []. Treating them the same reports "no unexpected listeners" for a
+# host that was never examined -- an empty check set reading as a pass.
+# See docs/gotchas.md entry 8.
+#
+# ---------------------------------------------------------------------------
+# OUTPUT: lx_results / lx_verdict
+# ---------------------------------------------------------------------------
+#   check   proto/address:port, prefixed by outcome class
+#   status  PASS | FAIL | SKIP
+#
+# SKIP is first-class and never equivalent to PASS. See entry 16.
+# ===========================================================================
+
+- name: Reset per-host evaluation state
+  # Facts persist across loop iterations. Without an explicit reset a host
+  # that produces no value inherits the previous host's results, and the
+  # report shows a plausible verdict computed from someone else's data.
+  ansible.builtin.set_fact:
+    lx_results: []
+    _ls_obs_keys: []
+    _ls_obs_pairs: []
+    _ls_exp_keys: []
+    _ls_exp_ports: []
+
+- name: Record that the socket list could not be read
+  ansible.builtin.set_fact:
+    lx_results:
+      - check: listeners
+        status: SKIP
+        expected: a readable socket list
+        actual: none
+        reason: >-
+          the socket list was not read on this host -- `ss` may be absent, or
+          the command failed. No listener was evaluated, which is not the
+          same as finding no unexpected listeners.
+  when: not (lx_facts.listeners_available | default(false) | bool)
+
+- name: Record that no baseline was configured
+  # A misspelled listener_baseline variable produces an empty expected set on
+  # every host in the fleet: nothing to compare against, zero findings, a
+  # clean report. See docs/gotchas.md entry 8.
+  ansible.builtin.set_fact:
+    lx_results:
+      - check: listener_baseline
+        status: SKIP
+        expected: at least one entry
+        actual: none configured
+        reason: >-
+          listener_baseline is empty or undefined for this host. No socket was
+          compared against anything. An empty check set is not a pass.
+  when:
+    - lx_facts.listeners_available | default(false) | bool
+    - (lx_facts.expected | default([])) | length == 0
+
+- name: Index the observed sockets
+  # Two indexes, built once. The full key answers "is this exact socket
+  # expected"; the proto/port key answers "is something listening on this
+  # port at a DIFFERENT address", which is the exposure question.
+  ansible.builtin.set_fact:
+    _ls_obs_keys: "{{ _ls_obs_keys + [_ls_key] }}"
+    _ls_obs_pairs: "{{ _ls_obs_pairs + [{'portkey': _ls_portkey, 'address': _ls_addr}] }}"
+  loop: "{{ lx_facts.listeners | default([]) }}"
+  loop_control:
+    loop_var: _ls_sock
+    label: "{{ _ls_sock.proto | d('?') }}/{{ _ls_sock.address | d('?') }}:{{ _ls_sock.port | d('?') }}"
+  vars:
+    _ls_addr: "{{ _ls_sock.address | default('') }}"
+    _ls_portkey: "{{ _ls_sock.proto | default('') }}/{{ _ls_sock.port | default('') }}"
+    _ls_key: "{{ _ls_portkey }}@{{ _ls_addr }}"
+  when:
+    - lx_facts.listeners_available | default(false) | bool
+    - (lx_facts.expected | default([])) | length > 0
+
+- name: Index the expected sockets
+  ansible.builtin.set_fact:
+    _ls_exp_keys: "{{ _ls_exp_keys + [_ls_key] }}"
+    _ls_exp_ports: "{{ _ls_exp_ports + [_ls_portkey] }}"
+  loop: "{{ lx_facts.expected | default([]) }}"
+  loop_control:
+    loop_var: _ls_exp
+    label: "{{ _ls_exp.proto | default('?') }}/{{ _ls_exp.address | default('?') }}:{{ _ls_exp.port | default('?') }}"
+  vars:
+    _ls_portkey: "{{ _ls_exp.proto | default('') }}/{{ _ls_exp.port | default('') }}"
+    _ls_key: "{{ _ls_portkey }}@{{ _ls_exp.address | default('') }}"
+  when:
+    - lx_facts.listeners_available | default(false) | bool
+    - (lx_facts.expected | default([])) | length > 0
+
+- name: Evaluate each expected socket
+  ansible.builtin.set_fact:
+    lx_results: "{{ lx_results + [_ls_row] }}"
+  loop: "{{ lx_facts.expected | default([]) }}"
+  loop_control:
+    loop_var: _ls_exp
+    label: "{{ _ls_exp.proto | default('?') }}/{{ _ls_exp.address | default('?') }}:{{ _ls_exp.port | default('?') }}"
+  vars:
+    _ls_portkey: "{{ _ls_exp.proto | default('') }}/{{ _ls_exp.port | default('') }}"
+    _ls_key: "{{ _ls_portkey }}@{{ _ls_exp.address | default('') }}"
+    _ls_pretty: >-
+      {{ _ls_exp.proto | default('?') }}/{{ _ls_exp.address | default('?') }}:{{ _ls_exp.port | default('?') }}
+
+    # Addresses currently bound to this proto/port, whatever they are.
+    _ls_actual_addrs: >-
+      {{ _ls_obs_pairs | selectattr('portkey', 'eq', _ls_portkey)
+         | map(attribute='address') | list }}
+
+    _ls_row: >-
+      {{
+        {
+          'check': 'expected:' ~ _ls_pretty,
+          'status': 'PASS',
+          'expected': _ls_pretty,
+          'actual': _ls_pretty,
+          'reason': ''
+        }
+        if _ls_key in _ls_obs_keys else (
+        {
+          'check': 'exposure:' ~ _ls_pretty,
+          'status': 'FAIL',
+          'expected': _ls_pretty,
+          'actual': (_ls_exp.proto | default('?')) ~ '/'
+                    ~ (_ls_actual_addrs | join(',')) ~ ':'
+                    ~ (_ls_exp.port | default('?') | string),
+          'reason': 'same protocol and port, DIFFERENT bind address. A
+                     port-only comparison would have reported no change here.'
+        }
+        if _ls_actual_addrs | length > 0 else
+        {
+          'check': 'missing:' ~ _ls_pretty,
+          'status': 'FAIL',
+          'expected': _ls_pretty,
+          'actual': 'nothing listening',
+          'reason': 'expected socket is not present -- the service may be down'
+        })
+      }}
+  when:
+    - lx_facts.listeners_available | default(false) | bool
+    - (lx_facts.expected | default([])) | length > 0
+
+- name: Evaluate each observed socket that was not expected
+  # Only sockets whose proto/port is entirely absent from the baseline. A
+  # proto/port that IS in the baseline at another address was already
+  # reported above as an exposure change; reporting it here as well would
+  # split one finding across two lines and bury the explanation.
+  ansible.builtin.set_fact:
+    lx_results: "{{ lx_results + [_ls_row] }}"
+  loop: "{{ lx_facts.listeners | default([]) }}"
+  loop_control:
+    loop_var: _ls_sock
+    label: "{{ _ls_sock.proto | d('?') }}/{{ _ls_sock.address | d('?') }}:{{ _ls_sock.port | d('?') }}"
+  vars:
+    _ls_portkey: "{{ _ls_sock.proto | default('') }}/{{ _ls_sock.port | default('') }}"
+    _ls_pretty: >-
+      {{ _ls_sock.proto | default('?') }}/{{ _ls_sock.address | default('?') }}:{{ _ls_sock.port | default('?') }}
+    _ls_row:
+      check: "unexpected:{{ _ls_pretty }}"
+      status: FAIL
+      expected: not listening
+      actual: "{{ _ls_pretty }}{{ ' (' ~ _ls_sock.process ~ ')' if _ls_sock.process | default('') else '' }}"
+      reason: >-
+        listening socket with no entry in listener_baseline
+  when:
+    - lx_facts.listeners_available | default(false) | bool
+    - (lx_facts.expected | default([])) | length > 0
+    - _ls_portkey not in _ls_exp_ports
+
+- name: Summarise host verdict
+  ansible.builtin.set_fact:
+    lx_verdict: >-
+      {{ 'FAIL' if lx_results | selectattr('status', 'eq', 'FAIL') | list | length > 0
+         else ('SKIP' if lx_results | selectattr('status', 'eq', 'SKIP') | list | length > 0
+               else 'PASS') }}
+    # A host with any SKIP is not clean, it is unevaluated. Rolling SKIP up
+    # into PASS is the mistake in docs/gotchas.md entry 16.

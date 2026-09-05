@@ -34,9 +34,9 @@ two diverge. Edit the repository, not the wiki.
 | Build a device inventory over SSH or SNMPv3 | [`playbooks/network/device_inventory.yml`](playbooks/network/device_inventory.yml) |
 | Discover which SNMP OIDs a platform actually answers | `playbooks/network/snmp_capability_probe.yml` |
 | Manage the SSH known-hosts trust store declaratively | `playbooks/network/host_key_trust.yml` |
-| Collect and archive Linux host facts | `playbooks/linux/fact_collection.yml` |
-| Apply package updates with a verification gate | `playbooks/linux/package_updates.yml` |
-| Enumerate listening services across a fleet | `playbooks/linux/listener_sweep.yml` |
+| Collect and archive Linux host facts | [`playbooks/linux/fact_collection.yml`](playbooks/linux/fact_collection.yml) |
+| Apply package updates with a verification gate | [`playbooks/linux/package_updates.yml`](playbooks/linux/package_updates.yml) |
+| Enumerate listening services across a fleet | [`playbooks/linux/listener_sweep.yml`](playbooks/linux/listener_sweep.yml) |
 | Distribute a wildcard certificate to many hosts | `playbooks/tls/cert_distribute.yml` |
 | Monitor service health and certificate expiry | [`playbooks/reporting/service_health.yml`](playbooks/reporting/service_health.yml) |
 

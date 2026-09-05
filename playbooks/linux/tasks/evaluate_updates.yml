@@ -1,0 +1,202 @@
+---
+# ===========================================================================
+# tasks/evaluate_updates.yml
+#
+# Decide whether an update run actually updated anything.
+# Produces lx_results and lx_verdict.
+#
+# No host access. Every input arrives in lx_facts.
+#
+# ---------------------------------------------------------------------------
+# A SUCCESSFUL UPGRADE IS NOT AN APPLIED UPGRADE
+# ---------------------------------------------------------------------------
+# `apt-get upgrade` exits 0 while holding packages back. So does dnf when a
+# package is excluded or a dependency cannot be satisfied. The task reports
+# changed, the play reports success, and the security update that motivated
+# the whole exercise is still not installed.
+#
+# Checking the module's return code therefore proves nothing about the state
+# of the machine. The only honest check is to re-read the upgradable list
+# AFTER the run and assert it is empty. That is what upgradable_after is for,
+# and it is the reason this playbook collects the same fact twice.
+#
+# ---------------------------------------------------------------------------
+# A REBOOT-REQUIRED HOST IS NOT UPDATED
+# ---------------------------------------------------------------------------
+# Packages on disk are new; the kernel and libraries in memory are old. The
+# host is in neither the old state nor the intended one. That is reported as
+# a FAIL rather than a note, because a note in a report nobody reads is
+# indistinguishable from no finding at all.
+#
+# ---------------------------------------------------------------------------
+# INPUT: lx_facts
+# ---------------------------------------------------------------------------
+#   name               str   Host identifier.
+#   disk_free_mb       str   Free space on the package cache filesystem, RAW.
+#   disk_required_mb   int   Pre-flight threshold.
+#   update_ran         bool  Whether the upgrade was actually attempted.
+#   upgradable_before  list  Package names upgradable before the run.
+#   upgradable_after   list  Package names upgradable after the run.
+#   held               list  Packages held, pinned or excluded.
+#   reboot_required    bool
+#
+# disk_free_mb is a STRING. It arrives as command output and the numeric
+# guard has to interrogate that text before trusting it. Coercing on the way
+# in destroys the evidence. See docs/gotchas.md entry 6.
+#
+# ---------------------------------------------------------------------------
+# OUTPUT: lx_results / lx_verdict
+# ---------------------------------------------------------------------------
+# Checks: disk_preflight, updates_applied, held_packages, reboot_required
+# ===========================================================================
+
+- name: Reset per-host evaluation state
+  ansible.builtin.set_fact:
+    lx_results: []
+
+- name: Evaluate the disk pre-flight gate
+  ansible.builtin.set_fact:
+    lx_results: "{{ lx_results + [_up_row] }}"
+  vars:
+    _up_free: "{{ lx_facts.disk_free_mb | default('') | string }}"
+
+    # The guard. `| int` on anything non-numeric returns 0 with no error, and
+    # 0 is a usable number: it compares cleanly against the threshold and
+    # produces a confident FAIL for a host whose free space was never
+    # measured. A fabricated finding is worse than a missing one because it
+    # gets acted on. See docs/gotchas.md entry 6.
+    _up_numeric: "{{ _up_free is match('^[0-9]+$') }}"
+    _up_required: "{{ lx_facts.disk_required_mb | default(512) | int }}"
+
+    _up_row: >-
+      {{
+        {
+          'check': 'disk_preflight',
+          'status': 'SKIP',
+          'expected': 'at least ' ~ (_up_required | string) ~ ' MB free',
+          'actual': 'unreadable',
+          'reason': 'free space did not parse as an integer (got '
+                    ~ (_up_free | truncate(30, true) | default('empty', true) | string)
+                    ~ '). The gate was NOT evaluated.'
+        }
+        if not (_up_numeric | bool) else
+        {
+          'check': 'disk_preflight',
+          'status': ('PASS' if (_up_free | int) >= (_up_required | int) else 'FAIL'),
+          'expected': 'at least ' ~ (_up_required | string) ~ ' MB free',
+          'actual': _up_free ~ ' MB',
+          'reason': ('' if (_up_free | int) >= (_up_required | int)
+                     else 'insufficient space -- an upgrade interrupted by a
+                           full filesystem leaves dpkg in a broken state that
+                           needs manual repair')
+        }
+      }}
+
+- name: Record that the update did not run
+  # The gate blocked it, or an earlier step did. The remaining checks have no
+  # inputs, and reporting them as PASS because nothing failed is exactly the
+  # error in docs/gotchas.md entry 16.
+  ansible.builtin.set_fact:
+    lx_results: "{{ lx_results + [_up_row] }}"
+  vars:
+    _up_row:
+      check: updates_applied
+      status: SKIP
+      expected: no upgradable packages remaining
+      actual: update not attempted
+      reason: >-
+        the upgrade was not run on this host, so its package state is
+        unknown. Not attempted is not up to date.
+  when: not (lx_facts.update_ran | default(false) | bool)
+
+- name: Evaluate whether the upgrade actually applied
+  ansible.builtin.set_fact:
+    lx_results: "{{ lx_results + [_up_row] }}"
+  vars:
+    _up_after: "{{ lx_facts.upgradable_after | default([]) }}"
+    _up_before: "{{ lx_facts.upgradable_before | default([]) }}"
+    _up_row: >-
+      {{
+        {
+          'check': 'updates_applied',
+          'status': 'PASS',
+          'expected': 'no upgradable packages remaining',
+          'actual': (_up_before | length | string) ~ ' applied, 0 remaining',
+          'reason': ''
+        }
+        if _up_after | length == 0 else
+        {
+          'check': 'updates_applied',
+          'status': 'FAIL',
+          'expected': 'no upgradable packages remaining',
+          'actual': (_up_after | length | string) ~ ' still upgradable: '
+                    ~ (_up_after | join(', ')),
+          'reason': 'the upgrade reported success and these packages were not
+                     installed. Checking the task return code alone would have
+                     reported this host as updated.'
+        }
+      }}
+  when: lx_facts.update_ran | default(false) | bool
+
+- name: Evaluate held packages
+  # Held, pinned or excluded packages are the usual reason upgradable_after
+  # is non-empty, and they are deliberate often enough that they need their
+  # own line rather than being folded into the count above.
+  ansible.builtin.set_fact:
+    lx_results: "{{ lx_results + [_up_row] }}"
+  vars:
+    _up_held: "{{ lx_facts.held | default([]) }}"
+    _up_row: >-
+      {{
+        {
+          'check': 'held_packages',
+          'status': 'PASS',
+          'expected': 'no packages held back',
+          'actual': 'none',
+          'reason': ''
+        }
+        if _up_held | length == 0 else
+        {
+          'check': 'held_packages',
+          'status': 'FAIL',
+          'expected': 'no packages held back',
+          'actual': (_up_held | length | string) ~ ' held: ' ~ (_up_held | join(', ')),
+          'reason': 'these will never update until the hold is released. If
+                     the hold is intentional, list them in updates_expected_holds
+                     so the exception is recorded rather than rediscovered.'
+        }
+      }}
+  when: lx_facts.update_ran | default(false) | bool
+
+- name: Evaluate whether a reboot is outstanding
+  ansible.builtin.set_fact:
+    lx_results: "{{ lx_results + [_up_row] }}"
+  vars:
+    _up_row: >-
+      {{
+        {
+          'check': 'reboot_required',
+          'status': 'FAIL',
+          'expected': 'no reboot outstanding',
+          'actual': 'reboot required',
+          'reason': 'packages on disk are updated, the running kernel and
+                     libraries are not. The host is in neither the old state
+                     nor the intended one.'
+        }
+        if lx_facts.reboot_required | default(false) | bool else
+        {
+          'check': 'reboot_required',
+          'status': 'PASS',
+          'expected': 'no reboot outstanding',
+          'actual': 'none',
+          'reason': ''
+        }
+      }}
+  when: lx_facts.update_ran | default(false) | bool
+
+- name: Summarise host verdict
+  ansible.builtin.set_fact:
+    lx_verdict: >-
+      {{ 'FAIL' if lx_results | selectattr('status', 'eq', 'FAIL') | list | length > 0
+         else ('SKIP' if lx_results | selectattr('status', 'eq', 'SKIP') | list | length > 0
+               else 'PASS') }}

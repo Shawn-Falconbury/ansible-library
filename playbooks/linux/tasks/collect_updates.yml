@@ -1,0 +1,111 @@
+---
+# ===========================================================================
+# tasks/collect_updates.yml
+#
+# Run the package update and collect what actually happened. Produces
+# lx_facts.
+#
+# ---------------------------------------------------------------------------
+# THE UPGRADABLE LIST IS READ TWICE
+# ---------------------------------------------------------------------------
+# Once before the upgrade and once after. The second read is the only thing
+# that can tell you whether the upgrade worked, because the module's return
+# code cannot: apt exits 0 while holding packages back.
+#
+# That second read is easy to leave out -- it feels redundant next to a task
+# that already reported changed -- and leaving it out is precisely how a
+# fleet reports fully patched while carrying the CVE it was patched for.
+#
+# ---------------------------------------------------------------------------
+# THE PRE-FLIGHT GATE RUNS BEFORE ANYTHING IS INSTALLED
+# ---------------------------------------------------------------------------
+# An upgrade that fills the filesystem leaves dpkg mid-transaction, which
+# needs hands-on repair. Free space is therefore read first, and the upgrade
+# is skipped -- not failed, skipped, with the reason recorded -- when it is
+# short. Skipping is honest: nothing was attempted, so nothing is known.
+#
+# updates_check_mode is honoured throughout. In check mode nothing is
+# installed and update_ran stays false, so the evaluation reports SKIP rather
+# than inventing a verdict from an upgrade that did not happen.
+# ===========================================================================
+
+- name: Read free space on the package cache filesystem
+  ansible.builtin.command:
+    argv: [df, --output=avail, --block-size=1M, "{{ updates_cache_path | default('/var/cache') }}"]
+  register: _up_df
+  changed_when: false
+  failed_when: false
+
+- name: Record the pre-flight measurement
+  ansible.builtin.set_fact:
+    # Kept as a string. The guard in evaluate_updates.yml inspects the raw
+    # text; coercing here destroys the evidence it needs.
+    _up_free_mb: >-
+      {{ ((_up_df.stdout | default('')).splitlines() | map('trim')
+          | select('match', '^[0-9]+$') | list | first) | default('', true) }}
+
+- name: Read the upgradable list before the run
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -o pipefail
+      apt-get --just-print upgrade 2>/dev/null \
+        | awk '/^Inst /{print $2}' | sort -u
+  register: _up_before
+  changed_when: false
+  failed_when: false
+
+- name: Apply updates
+  # ignore_errors, not a bare failure: a host whose upgrade fails must stay
+  # in the report. Letting the play abort turns one broken host into no
+  # report at all.
+  ansible.builtin.apt:
+    upgrade: safe
+    update_cache: true
+    cache_valid_time: "{{ updates_cache_valid_time | default(3600) }}"
+  register: _up_apply
+  become: true
+  ignore_errors: true
+  when:
+    - not (updates_check_mode | default(false) | bool)
+    - _up_free_mb is match('^[0-9]+$')
+    - (_up_free_mb | int) >= (updates_min_free_mb | default(512) | int)
+
+- name: Read the upgradable list after the run
+  # The check that actually proves something. See the header note.
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -o pipefail
+      apt-get --just-print upgrade 2>/dev/null \
+        | awk '/^Inst /{print $2}' | sort -u
+  register: _up_after
+  changed_when: false
+  failed_when: false
+
+- name: Read held packages
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -o pipefail
+      apt-mark showhold 2>/dev/null | sort -u
+  register: _up_hold
+  changed_when: false
+  failed_when: false
+
+- name: Check whether a reboot is outstanding
+  ansible.builtin.stat:
+    path: /var/run/reboot-required
+  register: _up_reboot
+
+- name: Assemble lx_facts
+  ansible.builtin.set_fact:
+    lx_facts:
+      name: "{{ inventory_hostname }}"
+      disk_free_mb: "{{ _up_free_mb }}"
+      disk_required_mb: "{{ updates_min_free_mb | default(512) }}"
+      update_ran: "{{ not (_up_apply is skipped | default(true)) }}"
+      upgradable_before: "{{ (_up_before.stdout | default('')).splitlines() | map('trim') | select('!=', '') | list }}"
+      upgradable_after: "{{ (_up_after.stdout | default('')).splitlines() | map('trim') | select('!=', '') | list }}"
+      held: "{{ (_up_hold.stdout | default('')).splitlines() | map('trim') | select('!=', '') | list }}"
+      reboot_required: "{{ _up_reboot.stat.exists | default(false) }}"

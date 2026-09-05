@@ -1,0 +1,246 @@
+---
+# ===========================================================================
+# listener_sweep.yml
+#
+# Enumerate listening sockets across the fleet and diff them against an
+# expected set. Dual-rendered: masked for distribution, full archived at 0600.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS PLAYBOOK EXISTS
+# ---------------------------------------------------------------------------
+# The obvious implementation compares port numbers, and a port-number diff
+# cannot see the change that matters most.
+#
+# A service that moves from 127.0.0.1:5432 to 0.0.0.0:5432 was listening on
+# 5432 before and is listening on 5432 now. A port-only sweep reports no
+# change, every run, while the database is reachable from the rest of the
+# network. Nothing in that report is wrong; it just never asked the question.
+#
+# So the comparison key here is proto/address:port, and a proto+port match at
+# a different address is reported as its own EXPOSURE CHANGE with both
+# addresses named -- not as one "missing" plus one "unexpected", which is the
+# same information arranged so nobody connects the two lines.
+#
+# Two further traps, both guarded:
+#
+#   * `ss` absent or failing yields zero lines, exactly like a host with
+#     nothing listening. Collection sets listeners_available from the return
+#     code so the two are distinguishable, and the first case SKIPs rather
+#     than reporting a clean sweep. Entry 8.
+#   * Unreachable hosts vanish from the play before reporting. Rows are built
+#     from ansible_play_hosts_all so they still appear. Entries 2 and 3.
+#
+# ---------------------------------------------------------------------------
+# REQUIRED CONFIGURATION
+# ---------------------------------------------------------------------------
+# Inventory groups
+#   linux_hosts    Linux hosts reached over SSH.
+#
+# Variables (see vars/linux_health.yml.example)
+#   listener_baseline   list of {proto, address, port}, per host or per group
+#
+# A host with no baseline reports SKIP, not PASS. Nothing configured is not
+# the same as nothing wrong.
+#
+# ---------------------------------------------------------------------------
+# OPTIONAL VARIABLES
+# ---------------------------------------------------------------------------
+#   listener_report_dir     Default: {{ report_output_dir }} or ./reports
+#   listener_report_name    Default: listener_sweep
+#   listener_fail_on_skip   Default: true. Unknown is not acceptable.
+#   listener_fail_on_fail   Default: true
+#
+# ---------------------------------------------------------------------------
+# ASSUMPTIONS
+# ---------------------------------------------------------------------------
+#   * ansible.cfg is staged, so filter_plugins resolves and mask_ip is
+#     available to the template. Ansible discovers filter_plugins/ next to
+#     the PLAYBOOK; this one is two directories down. See entry 18.
+#   * iproute2 is installed. Where it is not, the sweep SKIPs and says so.
+#
+# ---------------------------------------------------------------------------
+# WHAT FAILS IF MISCONFIGURED
+# ---------------------------------------------------------------------------
+#   listener_baseline misspelled   Every host SKIPs and the run fails naming
+#                                  them. It does NOT report a clean fleet.
+#   Baseline written with service   `ss -n` is used precisely so ports stay
+#   names instead of port numbers   numeric. A baseline saying 'ssh' will
+#                                  never match '22' and reports as missing.
+#   ansible.cfg not staged         TemplateAssertionError: No filter named
+#                                  'mask_ip'. Points at the template, which
+#                                  is the wrong place to look.
+#   Group named incorrectly        Zero hosts, an empty report, exit 0. The
+#                                  first assert guards it.
+#
+# ---------------------------------------------------------------------------
+# USAGE
+# ---------------------------------------------------------------------------
+#   ansible-playbook playbooks/linux/listener_sweep.yml
+#   ansible-playbook playbooks/linux/listener_sweep.yml --limit linux_hosts
+#   ansible-playbook playbooks/linux/listener_sweep.yml \
+#       -e listener_fail_on_fail=false
+# ===========================================================================
+
+- name: Sweep listening sockets
+  hosts: linux_hosts
+  gather_facts: false
+  # No connection: keyword. ansible_connection lives in group_vars and
+  # outranks a play-level value silently. See docs/gotchas.md entry 4.
+
+  tasks:
+    - name: Collect listening sockets
+      ansible.builtin.include_tasks: tasks/collect_listeners.yml
+
+    - name: Evaluate against the baseline
+      ansible.builtin.include_tasks: tasks/evaluate_listeners.yml
+      when: not (lx_collection_failed | default(false))
+
+- name: Report on listening sockets
+  hosts: linux_hosts
+  gather_facts: false
+  # Declared, not inherited. run_once selects one host and depends on
+  # ordering the free strategy does not guarantee.
+  strategy: linear
+  # run_once and delegate_to are TASK keywords. On a play they parse and then
+  # fail at run time. See docs/gotchas.md entry 15.
+
+  vars:
+    listener_report_dir: >-
+      {{ listener_report_dir | default(report_output_dir | default('./reports')) }}
+    listener_report_name: "{{ listener_report_name | default('listener_sweep') }}"
+    listener_fail_on_skip: "{{ listener_fail_on_skip | default(true) }}"
+    listener_fail_on_fail: "{{ listener_fail_on_fail | default(true) }}"
+
+    _ls_masked_path: "{{ listener_report_dir }}/{{ listener_report_name }}.txt"
+    _ls_full_path: "{{ listener_report_dir }}/{{ listener_report_name }}-full.txt"
+
+    # Resolved with ignore_restrictions, so it still holds hosts that went
+    # unreachable during collection. That is the only reason a dead host can
+    # appear in this report at all.
+    _lx_hosts_all: "{{ ansible_play_hosts_all }}"
+
+  tasks:
+    - name: Guard against an empty play
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.assert:
+        that:
+          - _lx_hosts_all | length > 0
+        fail_msg: >-
+          The play matched zero hosts. Check that the inventory group
+          'linux_hosts' exists and is populated. An empty run is not a
+          passing run. See docs/gotchas.md entry 8.
+        success_msg: "{{ _lx_hosts_all | length }} host(s) in scope."
+
+    - name: Build the report rows
+      # apply:, not bare run_once/delegate_to -- those are not valid
+      # attributes of a TaskInclude and are rejected at syntax-check.
+      ansible.builtin.include_tasks:
+        file: tasks/build_host_rows.yml
+        apply:
+          run_once: true
+          delegate_to: localhost
+      run_once: true
+
+    - name: Ensure the report directory exists
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.file:
+        path: "{{ listener_report_dir }}"
+        state: directory
+        mode: "0750"
+
+    - name: Render the archive copy
+      run_once: true
+      delegate_to: localhost
+      # Written first, at 0600. If the masked render fails, the full data
+      # still exists rather than the run producing nothing at all.
+      ansible.builtin.template:
+        src: listener_report.txt.j2
+        dest: "{{ _ls_full_path }}"
+        mode: "0600"
+      vars:
+        report_mask: false
+        report_generated: "{{ '%Y-%m-%d %H:%M:%S' | strftime }}"
+
+    - name: Render the distribution copy
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.template:
+        src: listener_report.txt.j2
+        dest: "{{ _ls_masked_path }}"
+        mode: "0640"
+      vars:
+        report_mask: true
+        report_generated: "{{ '%Y-%m-%d %H:%M:%S' | strftime }}"
+
+    - name: Scan the distribution copy for unmasked environment data
+      run_once: true
+      delegate_to: localhost
+      # The masking filters and the leak checker are independent
+      # implementations of the same rule. Running the checker over the render
+      # is what makes them agree in practice: a field added to the template
+      # that bypasses the masking macros leaves the filter tests green, and
+      # this catches it.
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../../scripts/leak_check.py"
+          - "{{ _ls_masked_path }}"
+      register: _ls_leak_scan
+      changed_when: false
+      failed_when: false
+
+    - name: Refuse to distribute a report that failed the scan
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.assert:
+        that:
+          - _ls_leak_scan.rc == 0
+        fail_msg: >-
+          The masked report at {{ _ls_masked_path }} contains data the leak
+          checker rejected. It has NOT been deleted -- inspect it, and treat
+          it as unmasked until you know why. Scanner output:
+          {{ _ls_leak_scan.stderr | default(_ls_leak_scan.stdout) | trim }}
+        success_msg: "Masked report passed the leak scan."
+
+    - name: Summarise to stdout
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.debug:
+        msg:
+          - "Hosts in scope:  {{ lx_rows | length }}"
+          - "Swept:           {{ lx_rows | selectattr('reachable') | list | length }}"
+          - "Not swept:       {{ lx_rows | rejectattr('reachable') | list | length }}"
+          - "Checks PASS:     {{ lx_counts.PASS }}"
+          - "Checks FAIL:     {{ lx_counts.FAIL }}"
+          - "Checks SKIP:     {{ lx_counts.SKIP }}  (unevaluated, not clean)"
+          - "Distribution:    {{ _ls_masked_path }} (0640, masked)"
+          - "Archive:         {{ _ls_full_path }} (0600, full)"
+
+    - name: Fail on unevaluated checks
+      run_once: true
+      delegate_to: localhost
+      # After the report is written. A run that fails before producing its
+      # artefact is much harder to triage.
+      ansible.builtin.assert:
+        that:
+          - lx_counts.SKIP | int == 0
+        fail_msg: >-
+          {{ lx_counts.SKIP }} check(s) could not be evaluated and were NOT
+          counted as clean. See the UNEVALUATED section of
+          {{ _ls_full_path }}.
+        success_msg: "Every check produced a verdict."
+      when: listener_fail_on_skip | bool
+
+    - name: Fail on failed checks
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.assert:
+        that:
+          - lx_counts.FAIL | int == 0
+        fail_msg: >-
+          {{ lx_counts.FAIL }} check(s) failed. See the FAILED section of
+          {{ _ls_full_path }}.
+        success_msg: "Every evaluated check passed."
+      when: listener_fail_on_fail | bool

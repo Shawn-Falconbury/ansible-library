@@ -1,0 +1,180 @@
+---
+# ===========================================================================
+# test_listener_report_masking.yml
+#
+# Render playbooks/linux/templates/listener_report.txt.j2 both ways from
+# fixture rows, and assert the masked copy does not contain what the full
+# copy does.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS IS SEPARATE FROM test_linux_logic.yml
+# ---------------------------------------------------------------------------
+# The logic test runs bare: no ansible.cfg, no collections, nothing staged.
+# That is deliberate -- the code most capable of producing a wrong verdict
+# should be testable on any checkout.
+#
+# This one cannot. It calls mask_ip and mask_hostname, which resolve through
+# the filter_plugins path declared in ansible.cfg, and ansible.cfg is
+# gitignored. So it runs under tests/test_masking.sh, which stages a config
+# and restores whatever was there before. See docs/gotchas.md entry 18: the
+# error is "Could not load mask_ip", which points at the template rather
+# than at a search path.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS CATCHES THAT THE LOGIC TEST DOES NOT
+# ---------------------------------------------------------------------------
+# The logic test proves the verdicts are right. It says nothing about
+# whether the template can consume them, or whether it masks.
+#
+# This template is the hardest of the three to mask, because the address is
+# baked into the CHECK NAME as well as the expected and actual fields. A
+# field rendered without the addr() macro would leave every logic assertion
+# green while publishing the internal address of every listening service.
+# That exact leak happened once in service_health.txt.j2, through a summary
+# section built from pre-joined strings.
+#
+# So this asserts on RENDERED OUTPUT, by absence: no address the fixture
+# supplied may appear in the masked file, anywhere.
+#
+# ---------------------------------------------------------------------------
+# RUNNING
+# ---------------------------------------------------------------------------
+#   bash tests/test_masking.sh
+#
+# Not directly. See above.
+# ===========================================================================
+
+- name: Listener report masking test
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    _lr_tmp: /tmp/ansible-library-listener-test
+    # RFC 5737 documentation range, so the fixture itself is publishable.
+    # Named for what it is -- a fixture value. An earlier name here used a
+    # word that leak_check.py treats as credential-shaped, and the scanner
+    # flagged the assignment. It was right about the shape, so the fix was
+    # the name rather than a waiver.
+    #
+    # The first attempt at THIS comment tripped the same rule, by quoting the
+    # offending name inline. Worth knowing before writing the next one.
+    _lr_fixture_addr: 198.51.100.10
+
+  tasks:
+    - name: Build fixture rows for the report template
+      ansible.builtin.set_fact:
+        lx_rows:
+          - name: db-01.site.example
+            reachable: true
+            verdict: FAIL
+            checks:
+              - check: "exposure:tcp/{{ _lr_fixture_addr }}:5432"
+                status: FAIL
+                expected: "tcp/{{ _lr_fixture_addr }}:5432"
+                actual: tcp/0.0.0.0:5432
+                reason: same protocol and port, different bind address
+              - check: unexpected:tcp/0.0.0.0:6379
+                status: FAIL
+                expected: not listening
+                actual: tcp/0.0.0.0:6379 (redis)
+                reason: listening socket with no baseline entry
+          # Not swept. Must render an absence, never a zeroed count.
+          - name: web-01.site.example
+            reachable: false
+            verdict: SKIP
+            checks: []
+            reason: no session established, nothing collected
+        lx_counts:
+          PASS: 0
+          FAIL: 2
+          SKIP: 1
+
+    - name: Create the render directory
+      ansible.builtin.file:
+        path: "{{ _lr_tmp }}"
+        state: directory
+        mode: "0700"
+
+    - name: Render both copies
+      ansible.builtin.template:
+        src: ../playbooks/linux/templates/listener_report.txt.j2
+        dest: "{{ _lr_tmp }}/{{ item.file }}"
+        mode: "0600"
+      loop:
+        - {file: masked.txt, mask: true}
+        - {file: full.txt, mask: false}
+      loop_control:
+        label: "{{ item.file }}"
+      vars:
+        report_mask: "{{ item.mask }}"
+        report_generated: "2026-01-01 00:00:00"
+
+    - name: Read both renders back
+      ansible.builtin.slurp:
+        src: "{{ _lr_tmp }}/{{ item }}"
+      register: _lr_renders
+      loop: [masked.txt, full.txt]
+
+    - name: The full copy contains the real address and host names
+      # The control. A masking test that passes because the template renders
+      # nothing at all would be worthless.
+      ansible.builtin.assert:
+        that:
+          - _lr_full is search(_lr_fixture_addr)
+          - "'db-01.site.example' in _lr_full"
+          - "'web-01.site.example' in _lr_full"
+        fail_msg: "The unmasked render is missing content entirely: {{ _lr_full }}"
+        success_msg: "Unmasked render contains the address and both host names."
+      vars:
+        _lr_full: "{{ _lr_renders.results[1].content | b64decode }}"
+
+    - name: The masked copy contains none of them
+      # Absence, not a specific replacement string. That property holds no
+      # matter which fields the template grows or how mask_ip formats.
+      ansible.builtin.assert:
+        that:
+          - not (_lr_masked is search(_lr_fixture_addr))
+          - "'db-01.site.example' not in _lr_masked"
+          - "'web-01.site.example' not in _lr_masked"
+        fail_msg: >-
+          A fixture value survived into the masked render. It would have been
+          distributed. Render: {{ _lr_masked }}
+        success_msg: "No fixture address or host name survives into the masked render."
+      vars:
+        _lr_masked: "{{ _lr_renders.results[0].content | b64decode }}"
+
+    - name: Wildcard binds survive masking, deliberately
+      # 0.0.0.0 is not an address to protect, it is the finding. Masking it
+      # would redact the single most important fact on the page and leave a
+      # report that looks complete and says nothing.
+      ansible.builtin.assert:
+        that:
+          - "'0.0.0.0' in _lr_masked"
+        fail_msg: >-
+          The wildcard bind was masked. The masked report can no longer show
+          that a service is exposed on every interface, which is the whole
+          reason it is circulated.
+        success_msg: "Wildcard binds are still legible in the masked copy."
+      vars:
+        _lr_masked: "{{ _lr_renders.results[0].content | b64decode }}"
+
+    - name: The unswept host renders an absence, not a zero
+      # docs/gotchas.md entry 3 at the template level.
+      ansible.builtin.assert:
+        that:
+          - "'NOT SWEPT' in _lr_full"
+          # Matched as two fragments: the sentence wraps in the template, so
+          # asserting the joined phrase fails on the newline rather than on
+          # the behaviour under test.
+          - "'is unknown' in _lr_full"
+          - "'not approved' in _lr_full"
+        fail_msg: "The unswept host did not render as absent: {{ _lr_full }}"
+        success_msg: "Unswept host renders as absent."
+      vars:
+        _lr_full: "{{ _lr_renders.results[1].content | b64decode }}"
+
+    - name: Clean up the render directory
+      ansible.builtin.file:
+        path: "{{ _lr_tmp }}"
+        state: absent

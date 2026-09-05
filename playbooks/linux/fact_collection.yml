@@ -1,0 +1,245 @@
+---
+# ===========================================================================
+# fact_collection.yml
+#
+# Gather host facts and archive them as a machine-readable inventory source,
+# with an explicit verdict on whether each archived file is current.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS PLAYBOOK EXISTS
+# ---------------------------------------------------------------------------
+# The archive exists to be consumed -- as a dynamic inventory source, by a
+# report, by whatever reads the directory next. That consumer opens a file
+# and gets well-formed JSON.
+#
+# The obvious implementation gathers facts, writes one file per host, and
+# does nothing for the hosts that failed. Their previous file stays on disk.
+# It parses. It has every expected key. Nothing in it, and nothing in the
+# directory listing, distinguishes "written four minutes ago" from "written
+# in March and never refreshed since". The consumer reads a confident,
+# well-formed description of a machine that may no longer exist in that
+# shape, and has no way to know.
+#
+# That is worse than a missing file, because a missing file raises and a
+# stale file is believed. So every run writes a MANIFEST covering every host
+# it targeted -- including the ones it could not reach -- and a host that
+# failed while holding an old archive is a FAIL naming the age of the file.
+#
+# The per-host archives are never deleted on failure. Deleting them would
+# destroy the only record that exists for a host that has been down a while;
+# the manifest is what stops them being mistaken for current.
+#
+# ---------------------------------------------------------------------------
+# REQUIRED CONFIGURATION
+# ---------------------------------------------------------------------------
+# Inventory groups
+#   linux_hosts    Linux hosts reached over SSH.
+#
+# ---------------------------------------------------------------------------
+# OPTIONAL VARIABLES
+# ---------------------------------------------------------------------------
+#   facts_archive_dir     Where per-host JSON is written.
+#                         Default: {{ report_output_dir }}/facts or ./reports/facts
+#   facts_max_age_hours   Age above which an un-rewritten archive is stale.
+#                         Default: 24
+#   facts_gather_subset   Passed to setup. Default: ['all']
+#                         Narrowing this silently removes keys downstream
+#                         consumers may be reading. See the note below.
+#   facts_fail_on_stale   Default: true
+#
+# ---------------------------------------------------------------------------
+# ASSUMPTIONS
+# ---------------------------------------------------------------------------
+#   * The archive directory is on the control node and is 0700. Host facts
+#     include addresses, interface layouts and mount points; the directory is
+#     an inventory of the estate and is not a distribution artefact.
+#
+# ---------------------------------------------------------------------------
+# WHAT FAILS IF MISCONFIGURED
+# ---------------------------------------------------------------------------
+#   Host unreachable            Its archive is left alone and the manifest
+#                               records it as stale with an age. It is NOT
+#                               silently presented as current.
+#   facts_gather_subset narrowed  Keys vanish from the archive with no error.
+#                               A consumer applying `| default('')` then
+#                               fabricates values. Narrow it only if you know
+#                               what reads the output.
+#   Archive dir not writable    The run fails loudly before writing a partial
+#                               set, rather than half-updating the directory.
+#   Group named incorrectly     Zero hosts, an empty manifest, exit 0. The
+#                               first assert guards it.
+#
+# ---------------------------------------------------------------------------
+# USAGE
+# ---------------------------------------------------------------------------
+#   ansible-playbook playbooks/linux/fact_collection.yml
+#   ansible-playbook playbooks/linux/fact_collection.yml \
+#       -e facts_max_age_hours=6 --limit linux_hosts
+# ===========================================================================
+
+- name: Gather and archive host facts
+  hosts: linux_hosts
+  gather_facts: false
+  # No connection: keyword. See docs/gotchas.md entry 4.
+
+  vars:
+    facts_archive_dir: >-
+      {{ facts_archive_dir
+         | default((report_output_dir | default('./reports')) ~ '/facts') }}
+
+  tasks:
+    - name: Gather facts
+      ansible.builtin.setup:
+        gather_subset: "{{ facts_gather_subset | default(['all']) }}"
+      register: _fc_setup
+      ignore_errors: true
+      ignore_unreachable: true
+
+    - name: Record a collection failure without inventing data
+      # A host that did not answer must NOT get an lx_facts dict full of
+      # empty defaults, or the freshness check evaluates against those blanks
+      # and reports a measured absence rather than an absent measurement.
+      ansible.builtin.set_fact:
+        _fc_collected: false
+      when: _fc_setup.failed | default(false) or _fc_setup.unreachable | default(false)
+
+    - name: Record a successful collection
+      ansible.builtin.set_fact:
+        _fc_collected: true
+      when: not (_fc_setup.failed | default(false) or _fc_setup.unreachable | default(false))
+
+    - name: Ensure the archive directory exists
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.file:
+        path: "{{ facts_archive_dir }}"
+        state: directory
+        # 0700. The directory is a description of the estate: addresses,
+        # interfaces, mounts. Not a distribution artefact.
+        mode: "0700"
+
+    - name: Inspect the existing archive for this host
+      # Read BEFORE writing. Afterwards every file looks current, and the
+      # question this playbook exists to answer -- was this host's data
+      # refreshed, or is it left over -- becomes unanswerable.
+      delegate_to: localhost
+      ansible.builtin.stat:
+        path: "{{ facts_archive_dir }}/{{ inventory_hostname }}.json"
+      register: _fc_prior
+
+    - name: Write this host's facts
+      delegate_to: localhost
+      ansible.builtin.copy:
+        content: "{{ ansible_facts | to_nice_json }}\n"
+        dest: "{{ facts_archive_dir }}/{{ inventory_hostname }}.json"
+        mode: "0600"
+      when: _fc_collected | bool
+
+    - name: Read the control node clock
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.command:
+        argv: [date, +%s]
+      register: _fc_now
+      changed_when: false
+
+    - name: Assemble lx_facts
+      ansible.builtin.set_fact:
+        lx_facts:
+          name: "{{ inventory_hostname }}"
+          collected: "{{ _fc_collected }}"
+          archive_exists: "{{ _fc_prior.stat.exists | default(false) }}"
+          # Strings on purpose. The guard in evaluate_fact_archive.yml has to
+          # inspect the raw text. See docs/gotchas.md entry 6.
+          archive_mtime_epoch: >-
+            {{ (_fc_prior.stat.mtime | default('') | string).split('.')[0] }}
+          now_epoch: "{{ (_fc_now.stdout | default('')) | trim }}"
+          max_age_hours: "{{ facts_max_age_hours | default(24) }}"
+
+    - name: Evaluate whether this host's archive is current
+      ansible.builtin.include_tasks: tasks/evaluate_fact_archive.yml
+
+- name: Write the archive manifest
+  hosts: linux_hosts
+  gather_facts: false
+  strategy: linear
+
+  vars:
+    facts_archive_dir: >-
+      {{ facts_archive_dir
+         | default((report_output_dir | default('./reports')) ~ '/facts') }}
+    facts_fail_on_stale: "{{ facts_fail_on_stale | default(true) }}"
+    _fc_manifest: "{{ facts_archive_dir }}/manifest.json"
+
+    # Resolved with ignore_restrictions, so hosts that went unreachable in
+    # the first play are still here. They are the entire reason the manifest
+    # exists.
+    _lx_hosts_all: "{{ ansible_play_hosts_all }}"
+
+  tasks:
+    - name: Guard against an empty play
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.assert:
+        that:
+          - _lx_hosts_all | length > 0
+        fail_msg: >-
+          The play matched zero hosts. An empty archive run writes an empty
+          manifest, which reads as a fleet with nothing in it.
+          See docs/gotchas.md entry 8.
+        success_msg: "{{ _lx_hosts_all | length }} host(s) in scope."
+
+    - name: Build the manifest rows
+      ansible.builtin.include_tasks:
+        file: tasks/build_host_rows.yml
+        apply:
+          run_once: true
+          delegate_to: localhost
+      run_once: true
+
+    - name: Write the manifest
+      run_once: true
+      delegate_to: localhost
+      # Every targeted host appears here, current or not. A consumer reading
+      # the archive directory should read this first: it is the only thing
+      # that distinguishes a fresh file from a leftover one.
+      ansible.builtin.copy:
+        content: "{{ _fc_body | to_nice_json }}\n"
+        dest: "{{ _fc_manifest }}"
+        mode: "0600"
+      vars:
+        _fc_body:
+          generated: "{{ '%Y-%m-%dT%H:%M:%SZ' | strftime }}"
+          hosts_in_scope: "{{ lx_rows | length }}"
+          counts: "{{ lx_counts }}"
+          hosts: "{{ lx_rows }}"
+
+    - name: Summarise to stdout
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.debug:
+        msg:
+          - "Hosts in scope:  {{ lx_rows | length }}"
+          - "Archived now:    {{ lx_rows | selectattr('reachable') | list | length }}"
+          - "Not collected:   {{ lx_rows | rejectattr('reachable') | list | length }}"
+          - "Checks PASS:     {{ lx_counts.PASS }}"
+          - "Checks FAIL:     {{ lx_counts.FAIL }}  (includes stale archives)"
+          - "Checks SKIP:     {{ lx_counts.SKIP }}"
+          - "Manifest:        {{ _fc_manifest }}"
+
+    - name: Fail on stale or unevaluated archives
+      run_once: true
+      delegate_to: localhost
+      # Last, so the manifest is always written even when the run fails. A
+      # run that fails before producing its artefact is much harder to
+      # triage, and here the artefact is the thing that says what went wrong.
+      ansible.builtin.assert:
+        that:
+          - lx_counts.FAIL | int == 0
+          - lx_counts.SKIP | int == 0
+        fail_msg: >-
+          {{ lx_counts.FAIL }} stale or failed and {{ lx_counts.SKIP }}
+          unevaluated. Files for those hosts are still on disk and will read
+          as current to anything that does not check {{ _fc_manifest }}.
+        success_msg: "Every archive in scope was rewritten this run."
+      when: facts_fail_on_stale | bool

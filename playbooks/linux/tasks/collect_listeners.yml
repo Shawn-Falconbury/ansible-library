@@ -1,0 +1,96 @@
+---
+# ===========================================================================
+# tasks/collect_listeners.yml
+#
+# Read the listening socket list from a Linux host. Produces lx_facts.
+#
+# Collection ONLY. No comparison, no judgement -- those live in
+# evaluate_listeners.yml, which is what keeps them testable without hosts.
+#
+# ---------------------------------------------------------------------------
+# AN EMPTY LIST IS NOT AN ANSWER
+# ---------------------------------------------------------------------------
+# `ss` missing, `ss` failing, and a host with genuinely nothing listening all
+# produce zero lines. If collection reports [] for all three, the evaluation
+# layer finds no unexpected sockets and the host reports clean -- including
+# the host where the command never ran.
+#
+# So listeners_available is set from the RETURN CODE, independently of how
+# many lines came back. An empty list with listeners_available true means no
+# sockets; false means no data. See docs/gotchas.md entry 8.
+#
+# ---------------------------------------------------------------------------
+# WITHOUT PRIVILEGE THE PROCESS COLUMN IS SILENTLY EMPTY
+# ---------------------------------------------------------------------------
+# `ss -p` needs root to name the process owning a socket. Unprivileged, it
+# prints the sockets and leaves the process column blank -- no error, no
+# warning. A report that keys on process name would then match everything
+# against empty and find nothing wrong.
+#
+# The comparison in evaluate_listeners.yml therefore keys on proto, address
+# and port, which are visible either way. Process is carried for the report
+# only, and is explicitly not part of any verdict.
+# ===========================================================================
+
+- name: Read listening sockets
+  # -H no header, -t TCP, -u UDP, -l listening only, -n numeric.
+  # Numeric is load-bearing: without -n, ss resolves ports to service names
+  # and 0.0.0.0:22 becomes 0.0.0.0:ssh, which no longer compares against a
+  # baseline written in port numbers.
+  ansible.builtin.command:
+    argv: [ss, -Htuln]
+  register: _ls_ss
+  changed_when: false
+  failed_when: false
+
+- name: Record a collection failure without inventing data
+  ansible.builtin.set_fact:
+    lx_collection_failed: true
+    lx_collection_error: >-
+      ss exited {{ _ls_ss.rc }}. {{ _ls_ss.stderr | default('') | trim }}
+  when: _ls_ss.rc != 0
+
+- name: Start an empty socket list
+  ansible.builtin.set_fact:
+    _ls_rows: []
+  when: _ls_ss.rc == 0
+
+- name: Parse each socket line
+  # A loop rather than one dense Jinja expression. ss output columns shift
+  # depending on flags and kernel version, and a one-liner that silently
+  # picks the wrong field produces a baseline diff against nonsense.
+  #
+  # Layout for `ss -Htuln`:
+  #   Netid  State  Recv-Q  Send-Q  Local:Port  Peer:Port  [Process]
+  #             0      1       2       3           4          5
+  # after the Netid, which is split off first.
+  ansible.builtin.set_fact:
+    _ls_rows: "{{ _ls_rows + [_ls_row] }}"
+  loop: "{{ (_ls_ss.stdout | default('')).splitlines() | map('trim') | select('!=', '') | list }}"
+  loop_control:
+    loop_var: _ls_line
+    label: "{{ _ls_line | truncate(50, true) }}"
+  vars:
+    _ls_fields: "{{ _ls_line.split() }}"
+    _ls_local: "{{ _ls_fields[4] | default('') }}"
+    # rsplit on the last colon: an IPv6 local address is [::]:22 and
+    # splitting on the first colon would take '[' as the address.
+    _ls_port: "{{ _ls_local.split(':') | last }}"
+    _ls_addr: "{{ _ls_local[: (_ls_local | length) - (_ls_port | length) - 1] }}"
+    _ls_row:
+      proto: "{{ _ls_fields[0] | default('') }}"
+      address: "{{ _ls_addr }}"
+      port: "{{ _ls_port }}"
+      # Report only. Never part of a verdict -- see the header note.
+      process: "{{ _ls_fields[6] | default('') }}"
+  when: _ls_ss.rc == 0
+
+- name: Assemble lx_facts
+  ansible.builtin.set_fact:
+    lx_facts:
+      name: "{{ inventory_hostname }}"
+      # From the return code, not from the line count. See the header note.
+      listeners_available: true
+      listeners: "{{ _ls_rows }}"
+      expected: "{{ listener_baseline | default([]) }}"
+  when: _ls_ss.rc == 0

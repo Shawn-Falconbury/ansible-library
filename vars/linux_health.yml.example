@@ -1,0 +1,37 @@
+---
+# Copy to vars/linux_health.yml, or set these per group or per host in
+# group_vars / host_vars -- which is usually what you want, since a database
+# host and a web host do not listen on the same sockets.
+
+# ---------------------------------------------------------------------------
+# listener_sweep.yml
+# ---------------------------------------------------------------------------
+# Expected listening sockets. The bind ADDRESS is part of the comparison, not
+# decoration: a service moving from 127.0.0.1 to 0.0.0.0 keeps the same port,
+# and a port-only baseline would never notice.
+#
+# Ports are numbers, not service names. The sweep runs `ss -n` so that ports
+# stay numeric; a baseline saying 'ssh' will never match '22'.
+#
+# A host with no baseline reports SKIP, not PASS.
+listener_baseline:
+  - {proto: tcp, address: 0.0.0.0, port: "22"}
+  - {proto: tcp, address: 127.0.0.1, port: "5432"}
+  - {proto: udp, address: 0.0.0.0, port: "123"}
+
+# ---------------------------------------------------------------------------
+# package_updates.yml
+# ---------------------------------------------------------------------------
+# Free space required before an upgrade is attempted. An upgrade interrupted
+# by a full filesystem leaves dpkg mid-transaction and needs hands-on repair,
+# so the gate refuses rather than risking it.
+updates_min_free_mb: 512
+updates_cache_path: /var/cache
+
+# ---------------------------------------------------------------------------
+# fact_collection.yml
+# ---------------------------------------------------------------------------
+# Age above which an archive that was NOT rewritten this run counts as stale.
+# The file stays on disk either way; this controls when the manifest starts
+# calling it out.
+facts_max_age_hours: 24

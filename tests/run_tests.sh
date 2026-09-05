@@ -77,6 +77,13 @@ echo "== service health evaluation logic (fixture-driven) ============"
 ansible-playbook -i localhost, tests/test_service_health_logic.yml || FAILED=1
 
 echo
+echo "== linux playbook logic (fixture-driven) ======================="
+# One suite for all three Linux evaluations. They share the lx_results /
+# lx_verdict contract, so one harness drives all of them. Runs bare -- the
+# listener report masking half runs under test_masking.sh above.
+ansible-playbook -i localhost, tests/test_linux_logic.yml || FAILED=1
+
+echo
 if [ ${FAILED} -ne 0 ]; then
     echo "TEST SUITE FAILED"
     exit 1

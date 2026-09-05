@@ -55,4 +55,5 @@ cp ansible.cfg.example ansible.cfg
 RC=0
 ansible-playbook -i localhost, tests/test_report_masking.yml || RC=1
 ansible-playbook -i localhost, tests/test_health_report_masking.yml || RC=1
+ansible-playbook -i localhost, tests/test_listener_report_masking.yml || RC=1
 exit $RC

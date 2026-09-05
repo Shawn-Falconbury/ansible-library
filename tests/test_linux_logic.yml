@@ -1,0 +1,80 @@
+---
+# ===========================================================================
+# test_linux_logic.yml
+#
+# Exercise all three evaluation files in playbooks/linux/tasks/ against
+# recorded fixtures. No host, no network, no credentials.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS PROVES
+# ---------------------------------------------------------------------------
+# One headline case per playbook, plus the controls that stop each guard from
+# passing by rejecting everything:
+#
+#   listener_sweep   A service moving from 127.0.0.1 to 0.0.0.0 must FAIL as
+#                    an exposure change. A port-only comparison reports no
+#                    change here, forever, while the service is reachable
+#                    from the whole network.
+#
+#   package_updates  An upgrade that exited 0 while leaving packages
+#                    upgradable must FAIL. Checking the task return code
+#                    reports this host as patched.
+#
+#   fact_collection  A host that failed collection while holding a previous
+#                    archive must FAIL as stale. The old file parses, has
+#                    every key, and nothing in it says it is old.
+#
+# All three are invisible in production, because all three look like results.
+# The only way to know the guards work is to feed them the bad value
+# deliberately and assert on the outcome.
+#
+# The suite also pins the inverse in every case: valid input must still
+# produce a real PASS or FAIL. A guard that rejects everything is as broken
+# as one that accepts everything, and it fails in the direction that looks
+# responsible.
+#
+# ---------------------------------------------------------------------------
+# RUNNING
+# ---------------------------------------------------------------------------
+#   ansible-playbook -i localhost, tests/test_linux_logic.yml
+#
+# Pass the inventory explicitly. Running against the project inventory risks
+# picking up group_vars that set ansible_connection, which outranks the
+# play-level connection keyword and would send these tasks at a host.
+# See docs/gotchas.md entry 4.
+# ===========================================================================
+
+- name: Fixture-based evaluation of the Linux playbook logic
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - fixtures/linux/cases.yml
+
+  tasks:
+    - name: Evaluate every fixture case
+      ansible.builtin.include_tasks: run_one_linux_case.yml
+      loop: "{{ linux_cases }}"
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+
+    - name: Report suite outcome
+      ansible.builtin.debug:
+        msg:
+          - "cases:      {{ linux_cases | length }}"
+          - "assertions: {{ _lx_assertions | default(0) }}"
+          - "failed:     {{ _lx_failed | default([]) | length }}"
+
+    - name: Fail the suite if any case diverged
+      ansible.builtin.assert:
+        that:
+          - (_lx_failed | default([])) | length == 0
+        fail_msg: |-
+          Divergent cases:
+          {{ (_lx_failed | default([])) | join('
+          ') }}
+        success_msg: >-
+          All {{ _lx_assertions | default(0) }} assertions across
+          {{ linux_cases | length }} cases behaved as specified.

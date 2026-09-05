@@ -1,0 +1,56 @@
+{#-
+  update_report.txt.j2
+
+  Rendered ONCE, at 0600. There is deliberately no masked counterpart.
+
+  This report pairs hostnames with the exact packages still outstanding on
+  each one, which together describe what is exploitable where. There is no
+  audience for a redacted version of that, and shipping one would invite the
+  file to be forwarded. Compare listener_report.txt.j2, which does dual-
+  render because a masked socket sweep is genuinely useful to circulate.
+
+  INPUT: lx_rows -- see tasks/build_host_rows.yml.
+-#}
+================================================================================
+PACKAGE UPDATE RUN
+Generated {{ report_generated }} UTC
+
+UNMASKED. Contains hostnames and outstanding package versions. Do not forward.
+================================================================================
+
+SUMMARY
+  Hosts in scope    {{ lx_rows | length }}
+  Processed         {{ lx_rows | selectattr('reachable') | list | length }}
+  Not processed     {{ lx_rows | rejectattr('reachable') | list | length }}
+
+  Checks PASS       {{ lx_counts.PASS }}
+  Checks FAIL       {{ lx_counts.FAIL }}
+  Checks SKIP       {{ lx_counts.SKIP }}
+
+  A SKIP is NOT a pass. The upgrade was not attempted on that host, so its
+  package state is unknown rather than current.
+
+{% for row in lx_rows | sort(attribute='name') %}
+--------------------------------------------------------------------------------
+{{ row.name }}  [{{ row.verdict }}]
+{% if not row.reachable %}
+  NOT PROCESSED -- {{ row.reason | default('no session established') }}
+{#- No counts. "0 packages outstanding" for a host nobody reached renders as
+    a measurement and reads as the best-patched machine in the fleet.
+    See docs/gotchas.md entry 3. -#}
+  No upgrade was attempted. This host's package state is unknown, not current.
+{% else %}
+{% for check in row.checks %}
+  {{ '%-6s' | format(check.status) }} {{ check.check }}
+{%- if check.status != 'PASS' %}
+           expected: {{ check.expected | default('') }}
+           actual:   {{ check.actual | default('') }}
+{% if check.reason | default('') %}           reason:   {{ check.reason | trim }}
+{% endif %}
+{%- endif %}
+{% else %}
+  No checks were produced for this host.
+{% endfor %}
+{% endif %}
+{% endfor %}
+--------------------------------------------------------------------------------
