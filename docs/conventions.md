@@ -122,3 +122,32 @@ a timeout should say what timed out and how the new value was arrived at.
 Security-relevant changes state what was verified and how. Git is the
 authoritative anchor for these values, so the reasoning has to live where the
 change does.
+
+## What `--syntax-check` does not verify
+
+`ansible-playbook --syntax-check` parses. It does not resolve, and it does not
+evaluate. Three classes of defect pass it cleanly and then fail on the first
+real host:
+
+**Filters and expressions that raise.** `regex_search` returns `None` when it
+does not match, so `regex_search(...) | first` raises — and a trailing
+`| default('')` never runs, because `first` throws before `default` is
+reached. The expression reads as guarded and is not. This shipped in
+`collect_snmp.yml` and only ever failed on a device whose `sysDescr` omitted
+the word "Version".
+
+**Self-referential variables.** `x: "{{ x | default(30) }}"` in a *task's*
+`vars:` resolves to itself and recurses until the template stack blows. At
+*play* level the same expression resolves against extra-vars and works
+correctly. The two forms are visually identical.
+
+**Unresolvable roles.** `include_role` is a *dynamic* include: the role name
+is not looked up until the play runs. A playbook whose role cannot be found
+passes `--syntax-check` with no warning at all.
+
+`ansible-lint` catches the first two in seconds. Nothing catches the third
+except running the play, which is why `roles/host_rows` has its own test.
+
+So: **lint is not a style gate here, it is the only automated check for a
+class of failure that syntax-check is structurally unable to see.** CI runs
+both, and `tests/test_bare_lint.sh` reproduces the lint job locally.
