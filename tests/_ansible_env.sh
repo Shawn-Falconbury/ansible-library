@@ -53,11 +53,65 @@ MSG
     return 0
 }
 
+# Resolve the LINT tooling, which must NOT come from the same venv as
+# ansible-core.
+#
+# ansible-lint depends on ansible-core, and installing it into the runtime
+# venv upgrades that core to whatever the linter wants. That happened here:
+# `pip install ansible-lint` into ~/venvs/ansible-2.16 pulled core 2.21.3 into
+# a directory whose name promises 2.16, and every subsequent local run tested
+# a version CI does not.
+#
+# Nothing announced it. The suite kept passing, against the wrong runtime.
+#
+# CI keeps them apart by construction -- the lint job and the syntax job are
+# separate runners -- so the local harness does the same.
+#
+#   LINT_VENV=~/venvs/lint bash tests/test_bare_lint.sh
+resolve_lint() {
+    if [ -n "${LINT_VENV:-}" ]; then
+        if [ ! -x "${LINT_VENV}/bin/ansible-lint" ]; then
+            echo "LINT_VENV is set to '${LINT_VENV}' but" >&2
+            echo "${LINT_VENV}/bin/ansible-lint is not executable." >&2
+            return 1
+        fi
+        PATH="${LINT_VENV}/bin:${PATH}"
+        export PATH
+    fi
+
+    if ! command -v ansible-lint >/dev/null 2>&1; then
+        cat >&2 <<'MSG'
+ansible-lint not found.
+
+Point at a venv that has it, kept SEPARATE from the ansible-core venv:
+
+    python3 -m venv ~/venvs/lint
+    ~/venvs/lint/bin/pip install \
+        "ansible-core>=2.16,<2.18" "ansible-lint==26.8.0" "yamllint==1.38.0"
+    LINT_VENV=~/venvs/lint bash tests/test_bare_lint.sh
+
+Do not install ansible-lint into the runtime venv. It will upgrade
+ansible-core there and the suite will start testing a version CI does not.
+Versions are pinned in .github/workflows/ci.yml; match them.
+MSG
+        return 1
+    fi
+
+    LINT_VERSION="$(ansible-lint --version 2>/dev/null | head -1)"
+    export LINT_VERSION
+    return 0
+}
+
 # Print the resolved interpreter and version. Always call this before running
 # anything, so a passing run says which version it passed against.
 report_ansible() {
     printf 'ansible:  %s\n' "$(command -v ansible-playbook)"
     printf 'version:  %s\n' "${ANSIBLE_CORE_VERSION:-unknown}"
+}
+
+report_lint() {
+    printf 'lint:     %s\n' "$(command -v ansible-lint)"
+    printf 'version:  %s\n' "${LINT_VERSION:-unknown}"
 }
 
 # Repository root, derived from this file's location rather than from $PWD or

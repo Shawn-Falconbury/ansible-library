@@ -19,7 +19,8 @@
 #
 # Usage:
 #   bash tests/test_bare_lint.sh
-#   ANSIBLE_VENV=~/venvs/ansible-2.16 bash tests/test_bare_lint.sh
+#   ANSIBLE_VENV=~/venvs/ansible-2.16 LINT_VENV=~/venvs/lint \
+#       bash tests/test_bare_lint.sh
 
 set -o pipefail
 
@@ -28,6 +29,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${HERE}/_ansible_env.sh"
 
 resolve_ansible || exit 2
+resolve_lint || exit 2
 SRC="$(cd "${HERE}/.." && pwd)"
 
 TMP="$(mktemp -d)"
@@ -58,6 +60,7 @@ cd "$TMP" || exit 2
 
 echo "== environment =="
 report_ansible
+report_lint
 echo "bare tree:           $TMP"
 echo "ansible.cfg present: $([ -f ansible.cfg ] && echo 'YES - unexpected' || echo no)"
 echo "collections present: $([ -d collections ] && echo 'YES - unexpected' || echo no)"

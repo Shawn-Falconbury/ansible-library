@@ -25,6 +25,21 @@ Every run prints the interpreter and version it used.
 CI tests ansible-core 2.16 and 2.17. Running against a much newer core can pass
 here and fail there.
 
+**Keep ansible-lint in a separate venv.** It depends on ansible-core, so
+installing it alongside the runtime upgrades that core to whatever the linter
+wants -- silently, in a directory whose name still claims the old version.
+
+    python3 -m venv ~/venvs/lint
+    ~/venvs/lint/bin/pip install \
+        "ansible-core>=2.16,<2.18" "ansible-lint==26.8.0" "yamllint==1.38.0"
+
+    ANSIBLE_VENV=~/venvs/ansible-2.16 LINT_VENV=~/venvs/lint \
+        bash tests/test_bare_lint.sh
+
+Pin the lint venv to the same core range CI uses, or ansible-lint pulls a
+newer one and lints against a version nothing else runs. Versions live in
+.github/workflows/ci.yml.
+
 ## What runs where
 
 | Script | In `run_tests.sh` | Needs Ansible | Purpose |
