@@ -2,7 +2,7 @@
 # ===========================================================================
 # tasks/collect_listeners.yml
 #
-# Read the listening socket list from a Linux host. Produces lx_facts.
+# Read the listening socket list from a Linux host. Produces check_facts.
 #
 # Collection ONLY. No comparison, no judgement -- those live in
 # evaluate_listeners.yml, which is what keeps them testable without hosts.
@@ -85,9 +85,9 @@
       process: "{{ _ls_fields[6] | default('') }}"
   when: _ls_ss.rc == 0
 
-- name: Assemble lx_facts
+- name: Assemble check_facts
   ansible.builtin.set_fact:
-    lx_facts:
+    check_facts:
       name: "{{ inventory_hostname }}"
       # From the return code, not from the line count. See the header note.
       listeners_available: true

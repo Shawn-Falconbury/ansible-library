@@ -1,0 +1,57 @@
+{#-
+  check_report.txt.j2
+
+  Generic report over host_rows_list, shared by the playbooks in this
+  directory that produce check results rather than device inventory.
+
+  Rendered ONCE, at 0600, with no masked counterpart. Both consumers pair
+  hostnames with facts about what a device does or does not implement, and
+  with host key material -- neither has an audience that wants a redacted
+  version, and offering one invites forwarding. Compare
+  playbooks/linux/templates/listener_report.txt.j2, which dual-renders
+  because a masked socket sweep is genuinely useful to circulate.
+
+  INPUT: host_rows_list, host_rows_counts -- see roles/host_rows.
+-#}
+================================================================================
+{{ report_title }}
+Generated {{ report_generated }} UTC
+
+UNMASKED. Contains device names and collected values. Do not forward.
+================================================================================
+
+SUMMARY
+  Hosts in scope    {{ host_rows_list | length }}
+  Collected         {{ host_rows_list | selectattr('reachable') | list | length }}
+  Not collected     {{ host_rows_list | rejectattr('reachable') | list | length }}
+
+  Checks PASS       {{ host_rows_counts.PASS }}
+  Checks FAIL       {{ host_rows_counts.FAIL }}
+  Checks SKIP       {{ host_rows_counts.SKIP }}
+
+  A SKIP is NOT a pass. Nothing was learned about that check, which is not
+  the same as learning that it is fine.
+
+{% for row in host_rows_list | sort(attribute='name') %}
+--------------------------------------------------------------------------------
+{{ row.name }}  [{{ row.verdict }}]
+{% if not row.reachable %}
+  NOT COLLECTED -- {{ row.reason | default('no session established') }}
+{#- No counts here. A zero for a device nobody reached renders as a
+    measurement. See docs/gotchas.md entry 3. -#}
+  Nothing was recorded for this device. Its state is unknown, not verified.
+{% else %}
+{% for check in row.checks %}
+  {{ '%-6s' | format(check.status) }} {{ check.check }}
+{%- if check.status != 'PASS' %}
+           expected: {{ check.expected | default('') }}
+           actual:   {{ check.actual | default('') }}
+{% if check.reason | default('') %}           reason:   {{ check.reason | trim }}
+{% endif %}
+{%- endif %}
+{% else %}
+  No checks were produced for this device.
+{% endfor %}
+{% endif %}
+{% endfor %}
+--------------------------------------------------------------------------------

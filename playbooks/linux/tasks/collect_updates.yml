@@ -3,7 +3,7 @@
 # tasks/collect_updates.yml
 #
 # Run the package update and collect what actually happened. Produces
-# lx_facts.
+# check_facts.
 #
 # ---------------------------------------------------------------------------
 # THE UPGRADABLE LIST IS READ TWICE
@@ -98,9 +98,9 @@
     path: /var/run/reboot-required
   register: _up_reboot
 
-- name: Assemble lx_facts
+- name: Assemble check_facts
   ansible.builtin.set_fact:
-    lx_facts:
+    check_facts:
       name: "{{ inventory_hostname }}"
       disk_free_mb: "{{ _up_free_mb }}"
       disk_required_mb: "{{ updates_min_free_mb | default(512) }}"

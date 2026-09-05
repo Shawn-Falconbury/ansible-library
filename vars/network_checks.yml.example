@@ -1,0 +1,25 @@
+---
+# Copy to vars/network_checks.yml, or set per group / per host.
+
+# ---------------------------------------------------------------------------
+# snmp_capability_probe.yml
+# ---------------------------------------------------------------------------
+# OIDs to probe. A device that answers "No Such Object" is recorded as NOT
+# implementing it -- snmpget exits 0 for that reply, so the payload decides,
+# not the return code.
+snmp_platform_family: WS-C2960X
+snmp_probe_oids:
+  - {oid: "1.3.6.1.2.1.1.5.0", label: sysName}
+  - {oid: "1.3.6.1.2.1.1.3.0", label: sysUpTime}
+  - {oid: "1.3.6.1.4.1.9.9.109.1.1.1.1.8", label: cpmCPUTotal5minRev}
+  - {oid: "1.3.6.1.2.1.47.1.1.1.1.11.1", label: entPhysicalSerialNum}
+
+# ---------------------------------------------------------------------------
+# host_key_trust.yml
+# ---------------------------------------------------------------------------
+# The trust store is a TRACKED file. Git is the anchor: a key that changed on
+# disk without a commit explaining why is the finding. Reading a live
+# ~/.ssh/known_hosts instead would launder exactly that.
+host_key_store: ./inventory/known_hosts
+host_key_type: ed25519
+host_key_timeout: 10

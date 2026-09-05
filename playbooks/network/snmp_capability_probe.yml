@@ -1,0 +1,172 @@
+---
+# ===========================================================================
+# snmp_capability_probe.yml
+#
+# Establish which OIDs a platform family actually answers, and record the
+# result as a matrix other playbooks can consult.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS PLAYBOOK EXISTS
+# ---------------------------------------------------------------------------
+# snmpget exits 0 when the agent answers "I do not implement that OID". The
+# reply is a sentence on stdout:
+#
+#   No Such Object available on this agent at this OID
+#
+# A probe that treats rc 0 as success writes that sentence into the matrix as
+# though it were a value, and the matrix then says the OID is supported. Every
+# later playbook that consults it queries an OID the device has never
+# implemented and gets the same sentence back where it expected a number.
+#
+# So the return code is not the test. The payload is.
+#
+# The second trap is subtler. "The agent told us it does not have this" is a
+# measurement; "the agent did not reply" is the absence of one. Collapse them
+# and a probe run during a thirty-second outage permanently records a whole
+# family as not supporting OIDs it implements perfectly well -- in a file that
+# is then believed. Unsupported is FAIL; no reply is SKIP.
+#
+# ---------------------------------------------------------------------------
+# REQUIRED CONFIGURATION
+# ---------------------------------------------------------------------------
+#   Inventory group: ios_devices, with ansible_network_os and
+#   ansible_connection set in group_vars.
+#
+#   snmp_probe_oids        list of {oid, label}   (vars/snmp_probe.yml.example)
+#   snmp_platform_family   string recorded against the result
+#   vault_snmp_v3_user / _auth_key / _priv_key
+#
+# ---------------------------------------------------------------------------
+# OPTIONAL VARIABLES
+# ---------------------------------------------------------------------------
+#   probe_report_dir      Default: {{ report_output_dir }} or ./reports
+#   probe_fail_on_skip    Default: true. A matrix with unknowns is not a
+#                         matrix; re-run rather than record a guess.
+#   probe_fail_on_fail    Default: false. An unimplemented OID is a fact
+#                         about the platform, not a fault to fail a run on.
+#   mask_sensitive_output Default: true
+#
+# ---------------------------------------------------------------------------
+# WHAT FAILS IF MISCONFIGURED
+# ---------------------------------------------------------------------------
+#   snmp_probe_oids unset      Every device SKIPs and the run fails naming
+#                              them. It does NOT record an empty matrix, which
+#                              would read as "nothing supported".
+#   Wrong SNMPv3 credentials   Every probe SKIPs with a non-zero rc rather
+#                              than recording the family as unsupported.
+#   Group named incorrectly    Zero hosts, empty report, exit 0. Guarded.
+#
+# ---------------------------------------------------------------------------
+# USAGE
+# ---------------------------------------------------------------------------
+#   ansible-playbook playbooks/network/snmp_capability_probe.yml
+#   ansible-playbook playbooks/network/snmp_capability_probe.yml \
+#       --limit ios_devices -e probe_fail_on_fail=true
+# ===========================================================================
+
+- name: Probe SNMP capability
+  hosts: ios_devices
+  gather_facts: false
+  # No connection: keyword. ansible_connection lives in group_vars and
+  # outranks a play-level value silently. See docs/gotchas.md entry 4.
+
+  tasks:
+    - name: Collect probe results
+      ansible.builtin.include_tasks: tasks/collect_snmp_probe.yml
+
+    - name: Evaluate which OIDs are implemented
+      ansible.builtin.include_tasks: tasks/evaluate_snmp_probe.yml
+      when: not (collection_failed | default(false))
+
+- name: Report the capability matrix
+  hosts: ios_devices
+  gather_facts: false
+  strategy: linear
+
+  vars:
+    probe_report_dir: >-
+      {{ probe_report_dir | default(report_output_dir | default('./reports')) }}
+    probe_report_name: "{{ probe_report_name | default('snmp_capability') }}"
+    probe_fail_on_skip: "{{ probe_fail_on_skip | default(true) }}"
+    probe_fail_on_fail: "{{ probe_fail_on_fail | default(false) }}"
+    _sp_path: "{{ probe_report_dir }}/{{ probe_report_name }}.txt"
+
+  tasks:
+    - name: Guard against an empty play
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length > 0
+        fail_msg: >-
+          The play matched zero hosts. An empty probe run writes an empty
+          matrix, which reads as a platform that supports nothing.
+          See docs/gotchas.md entry 8.
+        success_msg: "{{ ansible_play_hosts_all | length }} device(s) in scope."
+
+    - name: Build the report rows
+      ansible.builtin.include_role:
+        name: host_rows
+        apply:
+          run_once: true
+          delegate_to: localhost
+      vars:
+        host_rows_targeted: "{{ ansible_play_hosts_all }}"
+      run_once: true
+
+    - name: Ensure the report directory exists
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.file:
+        path: "{{ probe_report_dir }}"
+        state: directory
+        mode: "0750"
+
+    - name: Render the matrix
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.template:
+        src: check_report.txt.j2
+        dest: "{{ _sp_path }}"
+        mode: "0600"
+      vars:
+        report_title: SNMP CAPABILITY MATRIX
+        report_generated: "{{ '%Y-%m-%d %H:%M:%S' | strftime }}"
+
+    - name: Summarise to stdout
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.debug:
+        msg:
+          - "Devices:       {{ host_rows_list | length }}"
+          - "Implemented:   {{ host_rows_counts.PASS }}"
+          - "Not supported: {{ host_rows_counts.FAIL }}"
+          - "Undetermined:  {{ host_rows_counts.SKIP }}  (no reply -- not the same as unsupported)"
+          - "Matrix:        {{ _sp_path }} (0600, not for distribution)"
+
+    - name: Fail on undetermined probes
+      run_once: true
+      delegate_to: localhost
+      # After the report is written. A matrix with unknowns in it is not a
+      # matrix -- re-run rather than record a guess that later playbooks will
+      # treat as authoritative.
+      ansible.builtin.assert:
+        that:
+          - host_rows_counts.SKIP | int == 0
+        fail_msg: >-
+          {{ host_rows_counts.SKIP }} probe(s) got no reply and were NOT
+          recorded as unsupported: {{ host_rows_skipped | join('; ') }}
+        success_msg: "Every probe produced a determinate answer."
+      when: probe_fail_on_skip | bool
+
+    - name: Fail on unimplemented OIDs
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.assert:
+        that:
+          - host_rows_counts.FAIL | int == 0
+        fail_msg: >-
+          {{ host_rows_counts.FAIL }} OID(s) are not implemented:
+          {{ host_rows_failed | join('; ') }}
+        success_msg: "Every probed OID is implemented."
+      when: probe_fail_on_fail | bool

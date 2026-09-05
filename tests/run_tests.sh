@@ -88,6 +88,13 @@ echo "== service health evaluation logic (fixture-driven) ============"
 ansible-playbook -i localhost, tests/test_service_health_logic.yml || FAILED=1
 
 echo
+echo "== network playbook logic (fixture-driven) ====================="
+# snmp_capability_probe and host_key_trust. Same harness as the linux
+# suite: every evaluation file consumes check_facts and emits
+# check_results, so one runner drives all five.
+ansible-playbook -i localhost, tests/test_network_logic.yml || FAILED=1
+
+echo
 echo "== linux playbook logic (fixture-driven) ======================="
 # One suite for all three Linux evaluations. They share the lx_results /
 # lx_verdict contract, so one harness drives all of them. Runs bare -- the

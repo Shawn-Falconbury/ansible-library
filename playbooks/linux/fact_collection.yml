@@ -96,7 +96,7 @@
       ignore_unreachable: true
 
     - name: Record a collection failure without inventing data
-      # A host that did not answer must NOT get an lx_facts dict full of
+      # A host that did not answer must NOT get an check_facts dict full of
       # empty defaults, or the freshness check evaluates against those blanks
       # and reports a measured absence rather than an absent measurement.
       ansible.builtin.set_fact:
@@ -143,9 +143,9 @@
       register: _fc_now
       changed_when: false
 
-    - name: Assemble lx_facts
+    - name: Assemble check_facts
       ansible.builtin.set_fact:
-        lx_facts:
+        check_facts:
           name: "{{ inventory_hostname }}"
           collected: "{{ _fc_collected }}"
           archive_exists: "{{ _fc_prior.stat.exists | default(false) }}"

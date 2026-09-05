@@ -1,0 +1,137 @@
+---
+# ===========================================================================
+# tasks/evaluate_snmp_probe.yml
+#
+# Decide, per OID, whether this platform actually answers it.
+# Produces check_results and check_verdict.
+#
+# No device access. Every input arrives in check_facts.
+#
+# ---------------------------------------------------------------------------
+# "NO SUCH OBJECT" IS A SUCCESSFUL COMMAND
+# ---------------------------------------------------------------------------
+# snmpget exits 0 when the agent answers "I do not implement that OID". The
+# reply arrives on stdout as text:
+#
+#   No Such Object available on this agent at this OID
+#
+# A probe that records stdout whenever the return code is zero therefore
+# writes that sentence into the capability matrix as though it were a value,
+# and the matrix reports the OID supported. Every later playbook that consults
+# the matrix then queries an OID the device has never implemented, and gets
+# the same sentence back where it expected a number.
+#
+# So the return code is not the test. The payload is.
+#
+# ---------------------------------------------------------------------------
+# UNSUPPORTED AND UNREACHABLE ARE DIFFERENT ANSWERS
+# ---------------------------------------------------------------------------
+# "The agent told us it does not have this OID" is a measurement. "The agent
+# did not reply" is the absence of one. Collapsing them means a probe run
+# during a thirty-second network blip permanently records a whole platform
+# family as not supporting OIDs it implements perfectly well -- and the
+# matrix, once written, is believed.
+#
+# Unsupported is FAIL: a definite negative result.
+# No reply is SKIP: nothing was learned. See docs/gotchas.md entry 16.
+#
+# ---------------------------------------------------------------------------
+# INPUT: check_facts
+# ---------------------------------------------------------------------------
+#   name     str   Device identifier.
+#   family   str   Platform family this result will be recorded against.
+#   probes   list  of {oid, label, rc, stdout}
+#                  rc and stdout are RAW, straight from snmpget.
+#
+# OUTPUT: check_results / check_verdict
+# ===========================================================================
+
+- name: Reset per-device evaluation state
+  ansible.builtin.set_fact:
+    check_results: []
+
+- name: Record that no probes were configured
+  # An empty probe list produces an empty matrix, which reads as "nothing
+  # supported" rather than "nothing asked". See docs/gotchas.md entry 8.
+  ansible.builtin.set_fact:
+    check_results:
+      - check: probe_matrix
+        status: SKIP
+        expected: at least one OID
+        actual: none configured
+        reason: >-
+          snmp_probe_oids is empty or undefined. No OID was probed on this
+          device, which is not the same as finding none supported.
+  when: (check_facts.probes | default([])) | length == 0
+
+- name: Evaluate each probe
+  ansible.builtin.set_fact:
+    check_results: "{{ check_results + [_sp_row] }}"
+  loop: "{{ check_facts.probes | default([]) }}"
+  loop_control:
+    loop_var: _sp
+    label: "{{ _sp.label | default(_sp.oid) | default('?') }}"
+  vars:
+    _sp_out: "{{ _sp.stdout | default('') | string | trim }}"
+    _sp_rc: "{{ _sp.rc | default(1) | string }}"
+
+    # The agent replied and said it does not implement this. net-snmp phrases
+    # it three ways depending on version and on whether the object or the
+    # instance is missing; all three mean the same thing and all three arrive
+    # with rc 0.
+    _sp_absent: >-
+      {{ _sp_out is search('No Such Object')
+         or _sp_out is search('No Such Instance')
+         or _sp_out is search('noSuchObject')
+         or _sp_out is search('noSuchInstance') }}
+
+    _sp_row: >-
+      {{
+        {
+          'check': 'oid:' ~ (_sp.label | default(_sp.oid) | default('?')),
+          'status': 'SKIP',
+          'expected': 'a reply',
+          'actual': 'no reply (rc ' ~ _sp_rc ~ ')',
+          'reason': 'the agent did not answer, so whether it implements this
+                     OID is unknown. Recording that as unsupported would let a
+                     transient timeout mark a whole platform family
+                     permanently.'
+        }
+        if _sp_rc != '0' else (
+        {
+          'check': 'oid:' ~ (_sp.label | default(_sp.oid) | default('?')),
+          'status': 'SKIP',
+          'expected': 'a reply',
+          'actual': 'empty',
+          'reason': 'rc 0 with no payload. Nothing was returned to evaluate.'
+        }
+        if _sp_out | length == 0 else (
+        {
+          'check': 'oid:' ~ (_sp.label | default(_sp.oid) | default('?')),
+          'status': 'FAIL',
+          'expected': 'a value',
+          'actual': 'not implemented',
+          'reason': 'the agent answered that it does not implement this OID.
+                     snmpget exited 0 -- checking the return code alone would
+                     have recorded this sentence as the value.'
+        }
+        if _sp_absent | bool else
+        {
+          'check': 'oid:' ~ (_sp.label | default(_sp.oid) | default('?')),
+          'status': 'PASS',
+          'expected': 'a value',
+          'actual': _sp_out | truncate(60, true),
+          'reason': ''
+        }))
+      }}
+
+- name: Summarise device verdict
+  ansible.builtin.set_fact:
+    check_verdict: >-
+      {{ 'FAIL' if check_results | selectattr('status', 'eq', 'FAIL') | list | length > 0
+         else ('SKIP' if check_results | selectattr('status', 'eq', 'SKIP') | list | length > 0
+               else 'PASS') }}
+    # FAIL here means "this family does not implement everything asked for",
+    # which is a finding about the platform rather than a fault. The run does
+    # not fail on it by default; it fails on SKIP, because a matrix with
+    # unknowns in it is not a matrix.

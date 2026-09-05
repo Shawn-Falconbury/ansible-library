@@ -5,7 +5,7 @@
 # Decide whether an update run actually updated anything.
 # Produces check_results and check_verdict.
 #
-# No host access. Every input arrives in lx_facts.
+# No host access. Every input arrives in check_facts.
 #
 # ---------------------------------------------------------------------------
 # A SUCCESSFUL UPGRADE IS NOT AN APPLIED UPGRADE
@@ -29,7 +29,7 @@
 # indistinguishable from no finding at all.
 #
 # ---------------------------------------------------------------------------
-# INPUT: lx_facts
+# INPUT: check_facts
 # ---------------------------------------------------------------------------
 #   name               str   Host identifier.
 #   disk_free_mb       str   Free space on the package cache filesystem, RAW.
@@ -58,7 +58,7 @@
   ansible.builtin.set_fact:
     check_results: "{{ check_results + [_up_row] }}"
   vars:
-    _up_free: "{{ lx_facts.disk_free_mb | default('') | string }}"
+    _up_free: "{{ check_facts.disk_free_mb | default('') | string }}"
 
     # The guard. `| int` on anything non-numeric returns 0 with no error, and
     # 0 is a usable number: it compares cleanly against the threshold and
@@ -66,7 +66,7 @@
     # measured. A fabricated finding is worse than a missing one because it
     # gets acted on. See docs/gotchas.md entry 6.
     _up_numeric: "{{ _up_free is match('^[0-9]+$') }}"
-    _up_required: "{{ lx_facts.disk_required_mb | default(512) | int }}"
+    _up_required: "{{ check_facts.disk_required_mb | default(512) | int }}"
 
     _up_row: >-
       {{
@@ -107,14 +107,14 @@
       reason: >-
         the upgrade was not run on this host, so its package state is
         unknown. Not attempted is not up to date.
-  when: not (lx_facts.update_ran | default(false) | bool)
+  when: not (check_facts.update_ran | default(false) | bool)
 
 - name: Evaluate whether the upgrade actually applied
   ansible.builtin.set_fact:
     check_results: "{{ check_results + [_up_row] }}"
   vars:
-    _up_after: "{{ lx_facts.upgradable_after | default([]) }}"
-    _up_before: "{{ lx_facts.upgradable_before | default([]) }}"
+    _up_after: "{{ check_facts.upgradable_after | default([]) }}"
+    _up_before: "{{ check_facts.upgradable_before | default([]) }}"
     _up_row: >-
       {{
         {
@@ -136,7 +136,7 @@
                      reported this host as updated.'
         }
       }}
-  when: lx_facts.update_ran | default(false) | bool
+  when: check_facts.update_ran | default(false) | bool
 
 - name: Evaluate held packages
   # Held, pinned or excluded packages are the usual reason upgradable_after
@@ -145,7 +145,7 @@
   ansible.builtin.set_fact:
     check_results: "{{ check_results + [_up_row] }}"
   vars:
-    _up_held: "{{ lx_facts.held | default([]) }}"
+    _up_held: "{{ check_facts.held | default([]) }}"
     _up_row: >-
       {{
         {
@@ -166,7 +166,7 @@
                      so the exception is recorded rather than rediscovered.'
         }
       }}
-  when: lx_facts.update_ran | default(false) | bool
+  when: check_facts.update_ran | default(false) | bool
 
 - name: Evaluate whether a reboot is outstanding
   ansible.builtin.set_fact:
@@ -183,7 +183,7 @@
                      libraries are not. The host is in neither the old state
                      nor the intended one.'
         }
-        if lx_facts.reboot_required | default(false) | bool else
+        if check_facts.reboot_required | default(false) | bool else
         {
           'check': 'reboot_required',
           'status': 'PASS',
@@ -192,7 +192,7 @@
           'reason': ''
         }
       }}
-  when: lx_facts.update_ran | default(false) | bool
+  when: check_facts.update_ran | default(false) | bool
 
 - name: Summarise host verdict
   ansible.builtin.set_fact:

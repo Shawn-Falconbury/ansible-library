@@ -1,0 +1,82 @@
+---
+# ===========================================================================
+# tasks/collect_snmp_probe.yml
+#
+# Probe each configured OID once and record the RAW result. Produces
+# check_facts.
+#
+# Collection only. Nothing here decides whether an OID is supported -- that
+# is evaluate_snmp_probe.yml, which is what keeps the decision testable.
+#
+# THE RETURN CODE AND THE PAYLOAD ARE RECORDED SEPARATELY
+# snmpget exits 0 when the agent answers "I do not implement that". Storing
+# only the return code, or only stdout, loses exactly the distinction the
+# evaluation needs: rc says whether the agent replied, stdout says what it
+# replied. Both are carried through untouched.
+#
+# no_log is bound to the toggle, not hardcoded -- a hardcoded no_log censors
+# the error text and makes a credential failure undebuggable. See entry 9.
+# ===========================================================================
+
+- name: Start an empty probe result list
+  ansible.builtin.set_fact:
+    _sp_results: []
+
+- name: Probe each OID
+  ansible.builtin.command:
+    argv:
+      - snmpget
+      - "-v3"
+      - "-l"
+      - authPriv
+      - "-u"
+      - "{{ vault_snmp_v3_user }}"
+      - "-a"
+      - "{{ snmp_auth_protocol | default('SHA') }}"
+      - "-A"
+      - "{{ vault_snmp_v3_auth_key }}"
+      - "-x"
+      - "{{ snmp_priv_protocol | default('AES') }}"
+      - "-X"
+      - "{{ vault_snmp_v3_priv_key }}"
+      - "-Ovqt"
+      - "-t"
+      - "{{ snmp_timeout | default(5) }}"
+      - "-r"
+      - "{{ snmp_retries | default(2) }}"
+      - "{{ ansible_host | default(inventory_hostname) }}"
+      - "{{ _sp_oid.oid }}"
+  environment:
+    SNMPCONFPATH: "{{ snmp_conf_path | default('/etc/ansible-reference/snmp') }}"
+  delegate_to: localhost
+  loop: "{{ snmp_probe_oids | default([]) }}"
+  loop_control:
+    loop_var: _sp_oid
+    label: "{{ _sp_oid.label | default(_sp_oid.oid) }}"
+  register: _sp_raw
+  changed_when: false
+  failed_when: false
+  no_log: "{{ mask_sensitive_output | default(true) }}"
+
+- name: Assemble the probe results
+  # Carried verbatim. Any normalising here would have to guess which strings
+  # mean "not implemented", and that guess belongs in one testable place.
+  ansible.builtin.set_fact:
+    _sp_results: "{{ _sp_results + [_sp_row] }}"
+  loop: "{{ _sp_raw.results | default([]) }}"
+  loop_control:
+    loop_var: _sp_res
+    label: "{{ _sp_res._sp_oid.label | default('?') }}"
+  vars:
+    _sp_row:
+      oid: "{{ _sp_res._sp_oid.oid | default('') }}"
+      label: "{{ _sp_res._sp_oid.label | default(_sp_res._sp_oid.oid) | default('') }}"
+      rc: "{{ _sp_res.rc | default(1) }}"
+      stdout: "{{ _sp_res.stdout | default('') }}"
+
+- name: Assemble check_facts
+  ansible.builtin.set_fact:
+    check_facts:
+      name: "{{ inventory_hostname }}"
+      family: "{{ snmp_platform_family | default('unknown') }}"
+      probes: "{{ _sp_results }}"

@@ -1,0 +1,185 @@
+---
+# ===========================================================================
+# host_key_trust.yml
+#
+# Compare the SSH host key each device presents against the one recorded in
+# the trust store, with git as the authoritative anchor.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS PLAYBOOK EXISTS
+# ---------------------------------------------------------------------------
+# The obvious implementation asks "is there an entry for this host". That
+# answers yes for a device whose key was replaced this morning: the hostname
+# is present, the file parses, the check passes -- and a changed host key is
+# the one event a trust store exists to surface.
+#
+# So the comparison is on the key material, and "present with a different key"
+# is its own result, distinct from "absent". Those need different responses: a
+# missing entry is an onboarding gap, a changed key is either a rotation
+# nobody recorded or the thing the trust store was bought for.
+#
+# The second trap costs sleep. ssh-keyscan against an unreachable device
+# prints nothing and, on some versions, still exits 0. An empty scan compared
+# against a stored key looks exactly like a mismatch -- and a host-key
+# mismatch is an alarm somebody acts on at two in the morning, for a device
+# that is merely down. An empty scan is SKIP, before any comparison.
+#
+# ---------------------------------------------------------------------------
+# GIT IS THE ANCHOR
+# ---------------------------------------------------------------------------
+# The stored key is read from a file under version control, not from a live
+# ~/.ssh/known_hosts. A key that changed on disk without a commit explaining
+# why is precisely the finding; reading the live file would launder it.
+#
+# When a rotation is legitimate, update the store in a commit that says what
+# was verified and how. See docs/conventions.md on commit messages.
+#
+# ---------------------------------------------------------------------------
+# REQUIRED CONFIGURATION
+# ---------------------------------------------------------------------------
+#   Inventory group: ios_devices
+#   host_key_store   path to the tracked known-hosts file
+#                    (see vars/host_key_trust.yml.example)
+#
+# ---------------------------------------------------------------------------
+# OPTIONAL VARIABLES
+# ---------------------------------------------------------------------------
+#   host_key_type       Default: ed25519
+#   host_key_timeout    ssh-keyscan timeout. Default: 10
+#   trust_report_dir    Default: {{ report_output_dir }} or ./reports
+#   trust_fail_on_skip  Default: true
+#   trust_fail_on_fail  Default: true
+#
+# ---------------------------------------------------------------------------
+# WHAT FAILS IF MISCONFIGURED
+# ---------------------------------------------------------------------------
+#   host_key_store unset      The read fails and every device reports an
+#                             onboarding gap rather than a false match.
+#   Device unreachable        SKIP naming it. NOT a key-mismatch alarm.
+#   Wrong host_key_type       The device presents nothing for that type and
+#                             SKIPs, rather than appearing to have rotated.
+#   Group named incorrectly   Zero hosts, empty report, exit 0. Guarded.
+#
+# ---------------------------------------------------------------------------
+# USAGE
+# ---------------------------------------------------------------------------
+#   ansible-playbook playbooks/network/host_key_trust.yml
+#   ansible-playbook playbooks/network/host_key_trust.yml --limit ios_devices
+# ===========================================================================
+
+- name: Compare presented host keys against the trust store
+  hosts: ios_devices
+  gather_facts: false
+
+  tasks:
+    - name: Require a trust store path
+      # Unset, every grep fails and every device reports an onboarding gap --
+      # a fleet-wide finding caused by configuration, not by the fleet.
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.assert:
+        that:
+          - host_key_store is defined
+          - host_key_store | length > 0
+        fail_msg: >-
+          host_key_store must point at the tracked known-hosts file. Without
+          it every device compares against nothing and reports a gap.
+        success_msg: "Trust store: {{ host_key_store }}"
+
+    - name: Collect the presented and recorded keys
+      ansible.builtin.include_tasks: tasks/collect_host_keys.yml
+
+    - name: Compare them
+      ansible.builtin.include_tasks: tasks/evaluate_host_keys.yml
+      when: not (collection_failed | default(false))
+
+- name: Report on the trust store
+  hosts: ios_devices
+  gather_facts: false
+  strategy: linear
+
+  vars:
+    trust_report_dir: >-
+      {{ trust_report_dir | default(report_output_dir | default('./reports')) }}
+    trust_report_name: "{{ trust_report_name | default('host_key_trust') }}"
+    trust_fail_on_skip: "{{ trust_fail_on_skip | default(true) }}"
+    trust_fail_on_fail: "{{ trust_fail_on_fail | default(true) }}"
+    _hk_path: "{{ trust_report_dir }}/{{ trust_report_name }}.txt"
+
+  tasks:
+    - name: Guard against an empty play
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length > 0
+        fail_msg: >-
+          The play matched zero hosts. An empty run reports a fully trusted
+          fleet. See docs/gotchas.md entry 8.
+        success_msg: "{{ ansible_play_hosts_all | length }} device(s) in scope."
+
+    - name: Build the report rows
+      ansible.builtin.include_role:
+        name: host_rows
+        apply:
+          run_once: true
+          delegate_to: localhost
+      vars:
+        host_rows_targeted: "{{ ansible_play_hosts_all }}"
+      run_once: true
+
+    - name: Ensure the report directory exists
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.file:
+        path: "{{ trust_report_dir }}"
+        state: directory
+        mode: "0750"
+
+    - name: Render the report
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.template:
+        src: check_report.txt.j2
+        dest: "{{ _hk_path }}"
+        mode: "0600"
+      vars:
+        report_title: SSH HOST KEY TRUST
+        report_generated: "{{ '%Y-%m-%d %H:%M:%S' | strftime }}"
+
+    - name: Summarise to stdout
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.debug:
+        msg:
+          - "Devices:    {{ host_rows_list | length }}"
+          - "Matching:   {{ host_rows_counts.PASS }}"
+          - "Discrepant: {{ host_rows_counts.FAIL }}  (changed key, or never recorded)"
+          - "Unverified: {{ host_rows_counts.SKIP }}  (no key presented -- NOT a mismatch)"
+          - "Report:     {{ _hk_path }} (0600, not for distribution)"
+
+    - name: Fail on unverified devices
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.assert:
+        that:
+          - host_rows_counts.SKIP | int == 0
+        fail_msg: >-
+          {{ host_rows_counts.SKIP }} device(s) presented no key and were NOT
+          treated as mismatches: {{ host_rows_skipped | join('; ') }}
+        success_msg: "Every device presented a key to compare."
+      when: trust_fail_on_skip | bool
+
+    - name: Fail on discrepant keys
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.assert:
+        that:
+          - host_rows_counts.FAIL | int == 0
+        fail_msg: >-
+          {{ host_rows_counts.FAIL }} device(s) differ from the trust store:
+          {{ host_rows_failed | join('; ') }}
+          Treat as unverified until each change is accounted for, then update
+          the store in a commit that says what was verified and how.
+        success_msg: "Every device matches the recorded key."
+      when: trust_fail_on_fail | bool

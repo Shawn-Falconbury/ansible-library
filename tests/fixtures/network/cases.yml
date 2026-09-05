@@ -1,0 +1,219 @@
+---
+# Fixture set for the two network evaluation files.
+#
+# Each case names the evaluation file, supplies its facts dictionary, and
+# states the status every check MUST return. All values are synthetic.
+
+network_cases:
+
+  # =======================================================================
+  # snmp_capability_probe -- evaluate_snmp_probe.yml
+  # =======================================================================
+
+  # -----------------------------------------------------------------------
+  # THE CASE THIS SECTION EXISTS FOR.
+  # snmpget exits 0 and puts "No Such Object" on stdout. A probe that trusts
+  # the return code records that sentence as the value and the matrix reports
+  # the OID supported -- for an OID the agent has never implemented.
+  # -----------------------------------------------------------------------
+  - name: no_such_object_must_fail_not_pass
+    evaluate: playbooks/network/tasks/evaluate_snmp_probe.yml
+    facts:
+      name: sw-fixture-01
+      family: WS-C2960X
+      probes:
+        - oid: 1.3.6.1.4.1.9.9.109.1.1.1.1.8
+          label: cpmCPUTotal5minRev
+          rc: 0
+          stdout: "No Such Object available on this agent at this OID"
+    expect:
+      "oid:cpmCPUTotal5minRev": FAIL
+      verdict: FAIL
+
+  - name: no_such_instance_must_fail
+    evaluate: playbooks/network/tasks/evaluate_snmp_probe.yml
+    facts:
+      name: sw-fixture-02
+      family: WS-C2960X
+      probes:
+        - oid: 1.3.6.1.2.1.47.1.1.1.1.11.1
+          label: entPhysicalSerialNum
+          rc: 0
+          stdout: "No Such Instance currently exists at this OID"
+    expect:
+      "oid:entPhysicalSerialNum": FAIL
+      verdict: FAIL
+
+  - name: real_value_must_pass
+    evaluate: playbooks/network/tasks/evaluate_snmp_probe.yml
+    facts:
+      name: sw-fixture-03
+      family: WS-C2960X
+      probes:
+        - oid: 1.3.6.1.2.1.1.5.0
+          label: sysName
+          rc: 0
+          stdout: "sw-a-access-01.lab.example"
+    expect:
+      "oid:sysName": PASS
+      verdict: PASS
+
+  # -----------------------------------------------------------------------
+  # A timeout is not a measurement. Recording it as unsupported lets a
+  # thirty-second blip mark a platform family permanently.
+  # -----------------------------------------------------------------------
+  - name: timeout_must_skip_not_fail
+    evaluate: playbooks/network/tasks/evaluate_snmp_probe.yml
+    facts:
+      name: sw-fixture-04
+      family: WS-C2960X
+      probes:
+        - oid: 1.3.6.1.2.1.1.5.0
+          label: sysName
+          rc: 1
+          stdout: ""
+    expect:
+      "oid:sysName": SKIP
+      verdict: SKIP
+
+  # -----------------------------------------------------------------------
+  # A timeout that PRINTS something. net-snmp puts "Timeout: No Response
+  # from ..." on the output of some builds, and without the return-code
+  # branch that sentence is evaluated as a value and recorded as PASS -- the
+  # OID marked supported on the strength of the error saying it was not
+  # reached.
+  #
+  # The timeout case above has empty output and so is caught by the
+  # empty-payload branch even without the rc check. This one is not: it
+  # exists specifically so removing the rc branch fails a test.
+  # -----------------------------------------------------------------------
+  - name: timeout_with_output_must_skip
+    evaluate: playbooks/network/tasks/evaluate_snmp_probe.yml
+    facts:
+      name: sw-fixture-08
+      family: WS-C2960X
+      probes:
+        - oid: 1.3.6.1.2.1.1.5.0
+          label: sysName
+          rc: 1
+          stdout: "Timeout: No Response from sw-a-access-01.lab.example"
+    expect:
+      "oid:sysName": SKIP
+      verdict: SKIP
+
+  - name: empty_reply_must_skip
+    evaluate: playbooks/network/tasks/evaluate_snmp_probe.yml
+    facts:
+      name: sw-fixture-05
+      family: WS-C2960X
+      probes:
+        - oid: 1.3.6.1.2.1.1.5.0
+          label: sysName
+          rc: 0
+          stdout: "   "
+    expect:
+      "oid:sysName": SKIP
+      verdict: SKIP
+
+  - name: no_probes_configured_must_skip
+    evaluate: playbooks/network/tasks/evaluate_snmp_probe.yml
+    facts:
+      name: sw-fixture-06
+      family: WS-C2960X
+      probes: []
+    expect:
+      probe_matrix: SKIP
+      verdict: SKIP
+
+  # -----------------------------------------------------------------------
+  # Mixed: a real value, an unimplemented OID and a timeout on one device.
+  # FAIL outranks SKIP in the verdict, and neither swallows the other.
+  # -----------------------------------------------------------------------
+  - name: mixed_probe_results
+    evaluate: playbooks/network/tasks/evaluate_snmp_probe.yml
+    facts:
+      name: sw-fixture-07
+      family: C9200
+      probes:
+        - {oid: 1.3.6.1.2.1.1.5.0, label: sysName, rc: 0, stdout: "sw-b.lab.example"}
+        - {oid: 1.3.6.1.4.1.9.9.109.1.1.1.1.8, label: cpu5min, rc: 0, stdout: "noSuchObject"}
+        - {oid: 1.3.6.1.2.1.47.1.1.1.1.11.1, label: serial, rc: 2, stdout: ""}
+    expect:
+      "oid:sysName": PASS
+      "oid:cpu5min": FAIL
+      "oid:serial": SKIP
+      verdict: FAIL
+
+  # =======================================================================
+  # host_key_trust -- evaluate_host_keys.yml
+  # =======================================================================
+
+  # -----------------------------------------------------------------------
+  # THE CASE THIS SECTION EXISTS FOR.
+  # The hostname is in the trust store and the key is not the stored one. A
+  # check that asks "is there an entry for this host" passes this.
+  # -----------------------------------------------------------------------
+  - name: changed_key_must_fail
+    evaluate: playbooks/network/tasks/evaluate_host_keys.yml
+    facts:
+      name: rtr-fixture-01
+      key_type: ssh-ed25519
+      scanned: "AAAAC3NzaC1lZDI1NTE5AAAAIFIXTUREKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      stored: "AAAAC3NzaC1lZDI1NTE5AAAAIORIGINALKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    expect:
+      "host_key:ssh-ed25519": FAIL
+      verdict: FAIL
+
+  - name: matching_key_must_pass
+    evaluate: playbooks/network/tasks/evaluate_host_keys.yml
+    facts:
+      name: rtr-fixture-02
+      key_type: ssh-ed25519
+      scanned: "AAAAC3NzaC1lZDI1NTE5AAAAIORIGINALKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      stored: "AAAAC3NzaC1lZDI1NTE5AAAAIORIGINALKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    expect:
+      "host_key:ssh-ed25519": PASS
+      verdict: PASS
+
+  # -----------------------------------------------------------------------
+  # An unreachable device presents nothing. Compared against a stored key
+  # that looks exactly like a mismatch -- a host-key alarm somebody acts on
+  # at two in the morning, for a host that is merely down.
+  # -----------------------------------------------------------------------
+  - name: unreachable_host_must_skip_not_alarm
+    evaluate: playbooks/network/tasks/evaluate_host_keys.yml
+    facts:
+      name: rtr-fixture-03
+      key_type: ssh-ed25519
+      scanned: ""
+      stored: "AAAAC3NzaC1lZDI1NTE5AAAAIORIGINALKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    expect:
+      "host_key:ssh-ed25519": SKIP
+      verdict: SKIP
+
+  - name: unknown_host_must_fail_as_onboarding_gap
+    evaluate: playbooks/network/tasks/evaluate_host_keys.yml
+    facts:
+      name: rtr-fixture-04
+      key_type: ssh-ed25519
+      scanned: "AAAAC3NzaC1lZDI1NTE5AAAAINEWDEVICEKEYAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      stored: ""
+    expect:
+      "host_key:ssh-ed25519": FAIL
+      verdict: FAIL
+
+  # -----------------------------------------------------------------------
+  # Whitespace must not read as a rotation. ssh-keyscan and known_hosts
+  # differ in trailing newline handling depending on how the value was
+  # extracted.
+  # -----------------------------------------------------------------------
+  - name: whitespace_difference_must_still_pass
+    evaluate: playbooks/network/tasks/evaluate_host_keys.yml
+    facts:
+      name: rtr-fixture-05
+      key_type: ssh-rsa
+      scanned: "  AAAAB3NzaC1yc2EAAAADAQABAAABgQSAMEKEY  "
+      stored: "AAAAB3NzaC1yc2EAAAADAQABAAABgQSAMEKEY"
+    expect:
+      "host_key:ssh-rsa": PASS
+      verdict: PASS

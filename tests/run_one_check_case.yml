@@ -1,0 +1,63 @@
+---
+# ===========================================================================
+# run_one_check_case.yml
+#
+# Drive a single fixture case through a real evaluation file and compare
+# every check status against what the fixture specifies.
+#
+# GENERIC OVER EVALUATION FILES. The case names the file by path relative to
+# the repository root and supplies its facts; everything else is the same,
+# because every evaluation file consumes check_facts and emits check_results
+# and check_verdict. One status vocabulary is what makes one harness possible.
+#
+# NOTE: tests/run_one_linux_case.yml still exists and is nearly identical --
+# it predates this file and passes its facts as lx_facts. Migrating it means
+# renaming that input in three evaluation files, which is a change of its own
+# rather than something to bury here.
+#
+# Divergences are ACCUMULATED, not raised on the first mismatch. When a shared
+# guard regresses the useful signal is the full list of what broke together.
+# ===========================================================================
+
+- name: "{{ case.name }}: run the real evaluation logic"
+  # The production task file, unmodified. Testing a reimplementation would
+  # prove only that the reimplementation is self-consistent.
+  ansible.builtin.include_tasks: "../{{ case.evaluate }}"
+  vars:
+    check_facts: "{{ case.facts }}"
+
+- name: "{{ case.name }}: index results by check name"
+  ansible.builtin.set_fact:
+    _chk_effective: >-
+      {{ dict(check_results | map(attribute='check')
+              | zip(check_results | map(attribute='status')))
+         | combine({'verdict': check_verdict}) }}
+
+- name: "{{ case.name }}: compare each expectation against the actual status"
+  ansible.builtin.set_fact:
+    _chk_failed: >-
+      {{ (_chk_failed | default([]))
+         + [case.name ~ ' :: ' ~ exp.key
+            ~ ' :: expected ' ~ exp.value
+            ~ ', got ' ~ (_chk_effective[exp.key] | default('<absent>'))] }}
+  loop: "{{ case.expect | dict2items }}"
+  loop_control:
+    loop_var: exp
+    label: "{{ exp.key }}"
+  when: exp.value != (_chk_effective[exp.key] | default('<absent>'))
+
+- name: "{{ case.name }}: count the assertions made"
+  # Counted separately from the divergence accumulator. Folded together, a
+  # suite that asserted nothing would report zero failures and read as green.
+  ansible.builtin.set_fact:
+    _chk_assertions: >-
+      {{ (_chk_assertions | default(0) | int) + (case.expect | length) }}
+
+- name: "{{ case.name }}: show the result line"
+  ansible.builtin.debug:
+    msg: >-
+      {{ '%-44s' | format(case.name) }}
+      {{ check_results | map(attribute='check')
+         | zip(check_results | map(attribute='status'))
+         | map('join', '=') | join('  ') }}
+      => {{ check_verdict }}

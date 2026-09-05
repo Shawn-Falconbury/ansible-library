@@ -7,8 +7,8 @@ Cisco IOS / IOS-XE automation over `network_cli` and SNMPv3.
 | `reachability_check.yml` | complete | Verify devices are genuinely reachable. Splits by host class because `ansible.builtin.ping` does not test a `network_cli` device. |
 | `baseline_compliance.yml` | complete | Audit IOS version and configuration against `vars/baseline.yml`. Selectable SSH or SNMPv3 transport. Collection and evaluation are separate files so the logic is testable without hardware. |
 | `device_inventory.yml` | complete | Device inventory over SSH or SNMPv3, rendered to HTML twice: masked for distribution, full and archived at 0600. Row assembly is a separate task file so the unreachable-host path is testable without hardware. |
-| `snmp_capability_probe.yml` | planned | Modular probe matrix establishing which OIDs a platform family actually answers, with per-family fallback where a probe is unsupported. |
-| `host_key_trust.yml` | planned | Declarative management of the SSH known-hosts trust store, with git as the authoritative anchor. |
+| `snmp_capability_probe.yml` | complete | Modular probe matrix establishing which OIDs a platform family actually answers, with per-family fallback where a probe is unsupported. |
+| `host_key_trust.yml` | complete | Declarative management of the SSH known-hosts trust store, with git as the authoritative anchor. |
 
 ## Before running anything here
 

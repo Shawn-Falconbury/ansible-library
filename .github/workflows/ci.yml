@@ -149,6 +149,9 @@ jobs:
       - name: Service health logic test
         run: ansible-playbook -i localhost, tests/test_service_health_logic.yml
 
+      - name: Network playbook logic test
+        run: ansible-playbook -i localhost, tests/test_network_logic.yml
+
       - name: Linux playbook logic test
         run: ansible-playbook -i localhost, tests/test_linux_logic.yml
 

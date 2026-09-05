@@ -5,7 +5,7 @@
 # Decide whether this host's archived facts are current, stale, or absent.
 # Produces check_results and check_verdict.
 #
-# No host access. Every input arrives in lx_facts.
+# No host access. Every input arrives in check_facts.
 #
 # ---------------------------------------------------------------------------
 # A STALE ARCHIVE IS THE DANGEROUS OUTCOME
@@ -26,7 +26,7 @@
 # FAIL, named, with the age stated -- not a silent no-op.
 #
 # ---------------------------------------------------------------------------
-# INPUT: lx_facts
+# INPUT: check_facts
 # ---------------------------------------------------------------------------
 #   name                 str   Host identifier.
 #   collected            bool  Whether facts were gathered this run.
@@ -62,7 +62,7 @@
           'actual': 'gathered',
           'reason': ''
         }
-        if lx_facts.collected | default(false) | bool else
+        if check_facts.collected | default(false) | bool else
         {
           'check': 'collection',
           'status': 'FAIL',
@@ -76,9 +76,9 @@
   ansible.builtin.set_fact:
     check_results: "{{ check_results + [_fa_row] }}"
   vars:
-    _fa_mtime: "{{ lx_facts.archive_mtime_epoch | default('') | string }}"
-    _fa_now: "{{ lx_facts.now_epoch | default('') | string }}"
-    _fa_max: "{{ lx_facts.max_age_hours | default(24) | int }}"
+    _fa_mtime: "{{ check_facts.archive_mtime_epoch | default('') | string }}"
+    _fa_now: "{{ check_facts.now_epoch | default('') | string }}"
+    _fa_max: "{{ check_facts.max_age_hours | default(24) | int }}"
 
     # The guard. An empty or non-numeric mtime becomes 0 under `| int`, and
     # 0 produces an age of roughly twenty thousand days -- a specific,
@@ -101,7 +101,7 @@
           'actual': 'current',
           'reason': ''
         }
-        if lx_facts.collected | default(false) | bool else (
+        if check_facts.collected | default(false) | bool else (
         {
           'check': 'archive_freshness',
           'status': 'SKIP',
@@ -112,7 +112,7 @@
                      benign version of the failure -- but the host is still
                      unrecorded.'
         }
-        if not (lx_facts.archive_exists | default(false) | bool) else (
+        if not (check_facts.archive_exists | default(false) | bool) else (
         {
           'check': 'archive_freshness',
           'status': 'SKIP',

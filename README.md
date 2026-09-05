@@ -32,8 +32,8 @@ two diverge. Edit the repository, not the wiki.
 | Confirm every device is genuinely reachable | [`playbooks/network/reachability_check.yml`](playbooks/network/reachability_check.yml) |
 | Audit devices against a config and version baseline | `playbooks/network/baseline_compliance.yml` |
 | Build a device inventory over SSH or SNMPv3 | [`playbooks/network/device_inventory.yml`](playbooks/network/device_inventory.yml) |
-| Discover which SNMP OIDs a platform actually answers | `playbooks/network/snmp_capability_probe.yml` |
-| Manage the SSH known-hosts trust store declaratively | `playbooks/network/host_key_trust.yml` |
+| Discover which SNMP OIDs a platform actually answers | [`playbooks/network/snmp_capability_probe.yml`](playbooks/network/snmp_capability_probe.yml) |
+| Manage the SSH known-hosts trust store declaratively | [`playbooks/network/host_key_trust.yml`](playbooks/network/host_key_trust.yml) |
 | Collect and archive Linux host facts | [`playbooks/linux/fact_collection.yml`](playbooks/linux/fact_collection.yml) |
 | Apply package updates with a verification gate | [`playbooks/linux/package_updates.yml`](playbooks/linux/package_updates.yml) |
 | Enumerate listening services across a fleet | [`playbooks/linux/listener_sweep.yml`](playbooks/linux/listener_sweep.yml) |

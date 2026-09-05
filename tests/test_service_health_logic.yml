@@ -57,6 +57,29 @@
         loop_var: case
         label: "{{ case.name }}"
 
+
+    - name: The suite actually asserted something
+      # Added after a rename left this suite reading accumulators the runner
+      # no longer set. It reported "All 0 assertions across 16 cases" and
+      # exited 0 -- a green suite that checked nothing. That is the shape
+      # docs/gotchas.md entry 8 describes, and the runner's own comment warns
+      # about it one level down while the suite had no way to notice.
+      #
+      # Counting the expectations in the fixtures and comparing gives the
+      # suite something it cannot satisfy by doing nothing.
+      ansible.builtin.assert:
+        that:
+          - (_sh_assertions | default(0) | int) == (_expected_assertions | int)
+        fail_msg: >-
+          Expected {{ _expected_assertions }} assertions from the fixtures but
+          the harness recorded {{ _sh_assertions | default(0) }}. The suite is not
+          running what it thinks it is running.
+        success_msg: >-
+          {{ _sh_assertions }} assertions recorded, matching the fixtures.
+      vars:
+        _expected_assertions: >-
+          {{ service_health_cases | map(attribute='expect') | map('length') | sum }}
+
     - name: Report suite outcome
       ansible.builtin.debug:
         msg:

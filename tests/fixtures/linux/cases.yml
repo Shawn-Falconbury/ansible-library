@@ -30,7 +30,7 @@ linux_cases:
   # the database became reachable from the whole network.
   # -----------------------------------------------------------------------
   - name: exposure_change_must_fail
-    evaluate: evaluate_listeners.yml
+    evaluate: playbooks/linux/tasks/evaluate_listeners.yml
     description: >-
       Same proto and port, different bind address. Must FAIL as an exposure
       change, not pass as "port still listening".
@@ -46,7 +46,7 @@ linux_cases:
       verdict: FAIL
 
   - name: exact_match_must_pass
-    evaluate: evaluate_listeners.yml
+    evaluate: playbooks/linux/tasks/evaluate_listeners.yml
     description: >-
       Control. A guard that rejects everything is as broken as one that
       accepts everything, and it fails in the direction that looks careful.
@@ -62,7 +62,7 @@ linux_cases:
       verdict: PASS
 
   - name: unexpected_listener_must_fail
-    evaluate: evaluate_listeners.yml
+    evaluate: playbooks/linux/tasks/evaluate_listeners.yml
     description: A socket with no baseline entry at all.
     facts:
       name: host-fixture-03
@@ -78,7 +78,7 @@ linux_cases:
       verdict: FAIL
 
   - name: missing_listener_must_fail
-    evaluate: evaluate_listeners.yml
+    evaluate: playbooks/linux/tasks/evaluate_listeners.yml
     description: >-
       Expected socket absent entirely. Distinct from an exposure change --
       nothing is on that port at any address.
@@ -98,7 +98,7 @@ linux_cases:
   # that was never examined. See docs/gotchas.md entry 8.
   # -----------------------------------------------------------------------
   - name: unreadable_socket_list_must_skip
-    evaluate: evaluate_listeners.yml
+    evaluate: playbooks/linux/tasks/evaluate_listeners.yml
     description: No socket list means no verdict, not a clean verdict.
     facts:
       name: host-fixture-05
@@ -111,7 +111,7 @@ linux_cases:
       verdict: SKIP
 
   - name: no_baseline_configured_must_skip
-    evaluate: evaluate_listeners.yml
+    evaluate: playbooks/linux/tasks/evaluate_listeners.yml
     description: >-
       A misspelled listener_baseline yields an empty expected set on every
       host: nothing compared, zero findings, a clean report.
@@ -135,7 +135,7 @@ linux_cases:
   # upgradable. Checking the return code alone reports this host as patched.
   # -----------------------------------------------------------------------
   - name: upgrade_succeeded_but_packages_remain_must_fail
-    evaluate: evaluate_updates.yml
+    evaluate: playbooks/linux/tasks/evaluate_updates.yml
     description: >-
       A successful upgrade is not an applied upgrade. The post-run read is
       the only thing that can see this.
@@ -156,7 +156,7 @@ linux_cases:
       verdict: FAIL
 
   - name: clean_upgrade_must_pass
-    evaluate: evaluate_updates.yml
+    evaluate: playbooks/linux/tasks/evaluate_updates.yml
     description: Control. Everything applied, nothing held, no reboot.
     facts:
       name: host-fixture-08
@@ -175,7 +175,7 @@ linux_cases:
       verdict: PASS
 
   - name: held_packages_must_fail
-    evaluate: evaluate_updates.yml
+    evaluate: playbooks/linux/tasks/evaluate_updates.yml
     description: >-
       Held packages never update. A hold nobody recorded is indistinguishable
       from a hold nobody knows about.
@@ -196,7 +196,7 @@ linux_cases:
       verdict: FAIL
 
   - name: reboot_required_must_fail
-    evaluate: evaluate_updates.yml
+    evaluate: playbooks/linux/tasks/evaluate_updates.yml
     description: >-
       Packages on disk are new, the running kernel is old. The host is in
       neither state.
@@ -220,7 +220,7 @@ linux_cases:
   # that was never taken. A fabricated finding gets acted on.
   # -----------------------------------------------------------------------
   - name: unreadable_disk_must_skip_not_fail
-    evaluate: evaluate_updates.yml
+    evaluate: playbooks/linux/tasks/evaluate_updates.yml
     description: >-
       Free space that did not parse must SKIP, never FAIL with an invented
       figure.
@@ -239,7 +239,7 @@ linux_cases:
       verdict: SKIP
 
   - name: gated_out_must_skip
-    evaluate: evaluate_updates.yml
+    evaluate: playbooks/linux/tasks/evaluate_updates.yml
     description: >-
       Genuinely short on space. The gate FAILs, and the update checks SKIP
       because nothing was attempted -- not PASS because nothing failed.
@@ -268,7 +268,7 @@ linux_cases:
   # directory believes it.
   # -----------------------------------------------------------------------
   - name: stale_archive_must_fail
-    evaluate: evaluate_fact_archive.yml
+    evaluate: playbooks/linux/tasks/evaluate_fact_archive.yml
     description: >-
       Collection failed and a previous archive is on disk. Silence here is
       what makes a leftover file read as current data.
@@ -285,7 +285,7 @@ linux_cases:
       verdict: FAIL
 
   - name: fresh_archive_must_pass
-    evaluate: evaluate_fact_archive.yml
+    evaluate: playbooks/linux/tasks/evaluate_fact_archive.yml
     description: Control. Collected this run, archive rewritten.
     facts:
       name: host-fixture-14
@@ -300,7 +300,7 @@ linux_cases:
       verdict: PASS
 
   - name: never_archived_must_skip
-    evaluate: evaluate_fact_archive.yml
+    evaluate: playbooks/linux/tasks/evaluate_fact_archive.yml
     description: >-
       Collection failed and nothing is on disk. Still a failed collection,
       but nothing can mislead a consumer -- the benign version.
@@ -317,7 +317,7 @@ linux_cases:
       verdict: FAIL
 
   - name: unreadable_mtime_must_skip
-    evaluate: evaluate_fact_archive.yml
+    evaluate: playbooks/linux/tasks/evaluate_fact_archive.yml
     description: >-
       An archive whose age will not parse. Unguarded, 0 yields an age of
       roughly twenty thousand days -- a specific invented number that reads

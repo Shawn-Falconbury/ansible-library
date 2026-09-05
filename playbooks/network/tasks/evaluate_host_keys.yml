@@ -1,0 +1,108 @@
+---
+# ===========================================================================
+# tasks/evaluate_host_keys.yml
+#
+# Compare the SSH host key a device is currently presenting against the one
+# recorded in the trust store. Produces check_results and check_verdict.
+#
+# No device access. Every input arrives in check_facts.
+#
+# ---------------------------------------------------------------------------
+# COMPARE THE KEY, NOT THE HOSTNAME
+# ---------------------------------------------------------------------------
+# This is the entire reason the playbook exists.
+#
+# A trust-store check that asks "is there an entry for this host" answers yes
+# for a device whose key was replaced this morning. The hostname is present,
+# the file parses, the check passes -- and a changed host key is the one event
+# the trust store exists to surface.
+#
+# So the comparison is on the key material, and a host that is present with a
+# DIFFERENT key is its own result, distinct from one that is missing. Those
+# need different responses: a missing entry is an onboarding gap, a changed
+# key is either a legitimate rotation nobody recorded or the thing you bought
+# the trust store for.
+#
+# ---------------------------------------------------------------------------
+# A HOST THAT DID NOT ANSWER HAS NOT ROTATED ITS KEY
+# ---------------------------------------------------------------------------
+# ssh-keyscan against an unreachable device prints nothing and exits 0 on some
+# versions. An empty scan compared against a stored key looks exactly like a
+# mismatch, and a mismatch on a host key is an alarm somebody will act on at
+# two in the morning.
+#
+# An empty scan is therefore SKIP, always, before any comparison happens.
+#
+# ---------------------------------------------------------------------------
+# INPUT: check_facts
+# ---------------------------------------------------------------------------
+#   name       str   Device identifier.
+#   scanned    str   Key material presented now. RAW; may be empty.
+#   stored     str   Key material in the trust store. RAW; may be empty.
+#   key_type   str   For reporting only.
+#
+# OUTPUT: check_results / check_verdict
+# ===========================================================================
+
+- name: Reset per-device evaluation state
+  ansible.builtin.set_fact:
+    check_results: []
+
+- name: Evaluate the host key
+  ansible.builtin.set_fact:
+    check_results: "{{ check_results + [_hk_row] }}"
+  vars:
+    _hk_scanned: "{{ check_facts.scanned | default('') | string | trim }}"
+    _hk_stored: "{{ check_facts.stored | default('') | string | trim }}"
+    _hk_type: "{{ check_facts.key_type | default('ssh-ed25519') }}"
+
+    _hk_row: >-
+      {{
+        {
+          'check': 'host_key:' ~ _hk_type,
+          'status': 'SKIP',
+          'expected': 'a key to compare',
+          'actual': 'nothing scanned',
+          'reason': 'the device presented no key. It may be down, or filtered,
+                     or not running SSH. It has NOT been shown to differ from
+                     the stored key -- comparing an empty scan would raise a
+                     host-key alarm for a host that is merely unreachable.'
+        }
+        if _hk_scanned | length == 0 else (
+        {
+          'check': 'host_key:' ~ _hk_type,
+          'status': 'FAIL',
+          'expected': 'an entry in the trust store',
+          'actual': 'device presents a key, trust store has none',
+          'reason': 'no stored key to compare against. This is an onboarding
+                     gap, not a rotation: record the key deliberately rather
+                     than letting the next connection accept it.'
+        }
+        if _hk_stored | length == 0 else (
+        {
+          'check': 'host_key:' ~ _hk_type,
+          'status': 'PASS',
+          'expected': 'stored key',
+          'actual': 'matches',
+          'reason': ''
+        }
+        if _hk_scanned == _hk_stored else
+        {
+          'check': 'host_key:' ~ _hk_type,
+          'status': 'FAIL',
+          'expected': 'stored key',
+          'actual': 'DIFFERENT key presented',
+          'reason': 'the device is presenting a key that is not the one on
+                     record. A check keyed on the hostname alone would have
+                     passed this. Treat as unverified until the change is
+                     accounted for, then update the store in a commit that
+                     says why.'
+        }))
+      }}
+
+- name: Summarise device verdict
+  ansible.builtin.set_fact:
+    check_verdict: >-
+      {{ 'FAIL' if check_results | selectattr('status', 'eq', 'FAIL') | list | length > 0
+         else ('SKIP' if check_results | selectattr('status', 'eq', 'SKIP') | list | length > 0
+               else 'PASS') }}

@@ -18,8 +18,8 @@ Over `network_cli` and SNMPv3.
 | `reachability_check.yml` | ✅ complete | Verify devices are *genuinely* reachable. Splits by host class because `ansible.builtin.ping` does not test a `network_cli` device. |
 | `baseline_compliance.yml` | ✅ complete | Audit IOS version and configuration against `vars/baseline.yml`. Selectable SSH or SNMPv3 transport. Collection and evaluation are separate task files so the logic is testable without hardware. |
 | `device_inventory.yml` | ✅ complete | Device inventory over SSH **or** SNMPv3, dual-rendered to HTML: masked for distribution at 0640, full and archived at 0600. Row assembly lives in its own task file so the unreachable-host path is testable with no devices present. |
-| `snmp_capability_probe.yml` | 🔜 planned | Modular probe matrix establishing which OIDs a platform family actually answers, with per-family fallback where a probe is unsupported. |
-| `host_key_trust.yml` | 🔜 planned | Declarative management of the SSH known-hosts trust store, with git as the authoritative anchor. |
+| `snmp_capability_probe.yml` | ✅ complete | Modular probe matrix establishing which OIDs a platform family actually answers, with per-family fallback where a probe is unsupported. |
+| `host_key_trust.yml` | ✅ complete | Declarative management of the SSH known-hosts trust store, with git as the authoritative anchor. |
 
 **Reading order:** start with `reachability_check.yml`.
 

@@ -5,7 +5,7 @@
 # Compare observed listening sockets against the expected set.
 # Produces check_results and check_verdict.
 #
-# No host access. Every input arrives in lx_facts, already gathered by
+# No host access. Every input arrives in check_facts, already gathered by
 # tasks/collect_listeners.yml. That split is what lets the comparison run
 # against fixtures with nothing listening anywhere.
 #
@@ -27,7 +27,7 @@
 # "unexpected", which is the same information arranged so nobody reads it.
 #
 # ---------------------------------------------------------------------------
-# INPUT: lx_facts
+# INPUT: check_facts
 # ---------------------------------------------------------------------------
 #   name                 str   Host identifier, for reporting only.
 #   listeners_available  bool  Whether the socket list was actually read.
@@ -71,7 +71,7 @@
           the socket list was not read on this host -- `ss` may be absent, or
           the command failed. No listener was evaluated, which is not the
           same as finding no unexpected listeners.
-  when: not (lx_facts.listeners_available | default(false) | bool)
+  when: not (check_facts.listeners_available | default(false) | bool)
 
 - name: Record that no baseline was configured
   # A misspelled listener_baseline variable produces an empty expected set on
@@ -87,8 +87,8 @@
           listener_baseline is empty or undefined for this host. No socket was
           compared against anything. An empty check set is not a pass.
   when:
-    - lx_facts.listeners_available | default(false) | bool
-    - (lx_facts.expected | default([])) | length == 0
+    - check_facts.listeners_available | default(false) | bool
+    - (check_facts.expected | default([])) | length == 0
 
 - name: Index the observed sockets
   # Two indexes, built once. The full key answers "is this exact socket
@@ -97,7 +97,7 @@
   ansible.builtin.set_fact:
     _ls_obs_keys: "{{ _ls_obs_keys + [_ls_key] }}"
     _ls_obs_pairs: "{{ _ls_obs_pairs + [{'portkey': _ls_portkey, 'address': _ls_addr}] }}"
-  loop: "{{ lx_facts.listeners | default([]) }}"
+  loop: "{{ check_facts.listeners | default([]) }}"
   loop_control:
     loop_var: _ls_sock
     label: "{{ _ls_sock.proto | d('?') }}/{{ _ls_sock.address | d('?') }}:{{ _ls_sock.port | d('?') }}"
@@ -106,14 +106,14 @@
     _ls_portkey: "{{ _ls_sock.proto | default('') }}/{{ _ls_sock.port | default('') }}"
     _ls_key: "{{ _ls_portkey }}@{{ _ls_addr }}"
   when:
-    - lx_facts.listeners_available | default(false) | bool
-    - (lx_facts.expected | default([])) | length > 0
+    - check_facts.listeners_available | default(false) | bool
+    - (check_facts.expected | default([])) | length > 0
 
 - name: Index the expected sockets
   ansible.builtin.set_fact:
     _ls_exp_keys: "{{ _ls_exp_keys + [_ls_key] }}"
     _ls_exp_ports: "{{ _ls_exp_ports + [_ls_portkey] }}"
-  loop: "{{ lx_facts.expected | default([]) }}"
+  loop: "{{ check_facts.expected | default([]) }}"
   loop_control:
     loop_var: _ls_exp
     label: "{{ _ls_exp.proto | default('?') }}/{{ _ls_exp.address | default('?') }}:{{ _ls_exp.port | default('?') }}"
@@ -121,13 +121,13 @@
     _ls_portkey: "{{ _ls_exp.proto | default('') }}/{{ _ls_exp.port | default('') }}"
     _ls_key: "{{ _ls_portkey }}@{{ _ls_exp.address | default('') }}"
   when:
-    - lx_facts.listeners_available | default(false) | bool
-    - (lx_facts.expected | default([])) | length > 0
+    - check_facts.listeners_available | default(false) | bool
+    - (check_facts.expected | default([])) | length > 0
 
 - name: Evaluate each expected socket
   ansible.builtin.set_fact:
     check_results: "{{ check_results + [_ls_row] }}"
-  loop: "{{ lx_facts.expected | default([]) }}"
+  loop: "{{ check_facts.expected | default([]) }}"
   loop_control:
     loop_var: _ls_exp
     label: "{{ _ls_exp.proto | default('?') }}/{{ _ls_exp.address | default('?') }}:{{ _ls_exp.port | default('?') }}"
@@ -172,8 +172,8 @@
         })
       }}
   when:
-    - lx_facts.listeners_available | default(false) | bool
-    - (lx_facts.expected | default([])) | length > 0
+    - check_facts.listeners_available | default(false) | bool
+    - (check_facts.expected | default([])) | length > 0
 
 - name: Evaluate each observed socket that was not expected
   # Only sockets whose proto/port is entirely absent from the baseline. A
@@ -182,7 +182,7 @@
   # split one finding across two lines and bury the explanation.
   ansible.builtin.set_fact:
     check_results: "{{ check_results + [_ls_row] }}"
-  loop: "{{ lx_facts.listeners | default([]) }}"
+  loop: "{{ check_facts.listeners | default([]) }}"
   loop_control:
     loop_var: _ls_sock
     label: "{{ _ls_sock.proto | d('?') }}/{{ _ls_sock.address | d('?') }}:{{ _ls_sock.port | d('?') }}"
@@ -198,8 +198,8 @@
       reason: >-
         listening socket with no entry in listener_baseline
   when:
-    - lx_facts.listeners_available | default(false) | bool
-    - (lx_facts.expected | default([])) | length > 0
+    - check_facts.listeners_available | default(false) | bool
+    - (check_facts.expected | default([])) | length > 0
     - _ls_portkey not in _ls_exp_ports
 
 - name: Summarise host verdict

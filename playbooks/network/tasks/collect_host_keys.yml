@@ -1,0 +1,63 @@
+---
+# ===========================================================================
+# tasks/collect_host_keys.yml
+#
+# Scan the key a device presents now, and read the one on record. Produces
+# check_facts.
+#
+# Collection only. The comparison is evaluate_host_keys.yml.
+#
+# BOTH VALUES ARE CARRIED RAW, AND EMPTY IS ALLOWED
+# ssh-keyscan against an unreachable device prints nothing and, depending on
+# version, still exits 0. Normalising that to "no key" here would erase the
+# difference between "the device presented a different key" and "the device
+# presented nothing", and those two must not produce the same report line.
+#
+# The stored key is read from the trust store in git, not from a live
+# ~/.ssh/known_hosts. The point of the playbook is that git is the anchor:
+# a key that changed on disk without a commit is the finding.
+# ===========================================================================
+
+- name: Scan the key the device is presenting
+  ansible.builtin.command:
+    argv:
+      - ssh-keyscan
+      - "-T"
+      - "{{ host_key_timeout | default(10) }}"
+      - "-t"
+      - "{{ host_key_type | default('ed25519') }}"
+      - "{{ ansible_host | default(inventory_hostname) }}"
+  delegate_to: localhost
+  register: _hk_scan
+  changed_when: false
+  failed_when: false
+
+- name: Read the recorded key from the trust store
+  delegate_to: localhost
+  ansible.builtin.command:
+    argv:
+      - grep
+      - "-h"
+      - "-m1"
+      - "{{ ansible_host | default(inventory_hostname) }}"
+      - "{{ host_key_store }}"
+  register: _hk_stored
+  changed_when: false
+  failed_when: false
+
+- name: Assemble check_facts
+  ansible.builtin.set_fact:
+    check_facts:
+      name: "{{ inventory_hostname }}"
+      key_type: "{{ host_key_type | default('ed25519') }}"
+      # Field 3 of a known_hosts line is the base64 key material. Comparing
+      # whole lines would flag a hostname or port change as a key change,
+      # which is the same conflation the evaluation exists to avoid.
+      scanned: >-
+        {{ ((_hk_scan.stdout | default('')).splitlines()
+            | reject('match', '^#') | list | first | default('')).split() | last
+           if (_hk_scan.stdout | default('')) | trim | length > 0 else '' }}
+      stored: >-
+        {{ ((_hk_stored.stdout | default('')).splitlines()
+            | reject('match', '^#') | list | first | default('')).split() | last
+           if (_hk_stored.stdout | default('')) | trim | length > 0 else '' }}
