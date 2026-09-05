@@ -1,0 +1,77 @@
+---
+# ===========================================================================
+# test_service_health_logic.yml
+#
+# Exercise playbooks/reporting/tasks/evaluate_service_health.yml against
+# recorded fixtures. No host, no network, no credentials.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS PROVES
+# ---------------------------------------------------------------------------
+# Primarily that an unreadable certificate SKIPs rather than reporting a
+# fabricated day count. Unguarded, an empty epoch becomes 0, and
+# 0 - 1780000000 divides into "expired 20601 days ago" -- a specific,
+# plausible, actionable-looking finding for a check that never ran. That is
+# invisible in production because it looks like a result, so the only way to
+# know the guard works is to feed it the bad value and assert the outcome.
+#
+# The suite also pins the inverse: valid epochs must still produce a real
+# PASS/FAIL verdict. A guard that rejects everything is as broken as one that
+# accepts everything, and it fails in the direction that looks responsible.
+#
+# And it pins the distinction between a unit that is stopped and a unit
+# systemd has never heard of. Those need different responses -- one is an
+# outage, the other is a typo in configuration -- and collapsing them either
+# fabricates an outage or hides a check that never ran.
+#
+# ---------------------------------------------------------------------------
+# RUNNING
+# ---------------------------------------------------------------------------
+#   ansible-playbook -i localhost, tests/test_service_health_logic.yml
+#
+# Pass the inventory explicitly. Running against the project inventory risks
+# picking up group_vars that set ansible_connection, which outranks the
+# play-level connection keyword and would send these tasks at a host.
+# See docs/gotchas.md entry 4.
+# ===========================================================================
+
+- name: Fixture-based evaluation of the service health logic
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - fixtures/service_health/cases.yml
+
+  vars:
+    # Kept inline rather than read from vars/service_health.yml, so a change
+    # to the operational threshold cannot silently alter what the tests
+    # assert. The fixtures are written against this exact value.
+    cert_warn_days: 30
+
+  tasks:
+    - name: Evaluate every fixture case
+      ansible.builtin.include_tasks: run_one_health_case.yml
+      loop: "{{ service_health_cases }}"
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+
+    - name: Report suite outcome
+      ansible.builtin.debug:
+        msg:
+          - "cases:      {{ service_health_cases | length }}"
+          - "assertions: {{ _sh_assertions | default(0) }}"
+          - "failed:     {{ _sh_failed | default([]) | length }}"
+
+    - name: Fail the suite if any case diverged
+      ansible.builtin.assert:
+        that:
+          - (_sh_failed | default([])) | length == 0
+        fail_msg: |-
+          Divergent cases:
+          {{ (_sh_failed | default([])) | join('
+          ') }}
+        success_msg: >-
+          All {{ _sh_assertions | default(0) }} assertions across
+          {{ service_health_cases | length }} cases behaved as specified.

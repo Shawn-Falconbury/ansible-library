@@ -1,0 +1,154 @@
+---
+# ===========================================================================
+# test_health_report_masking.yml
+#
+# Render playbooks/reporting/templates/service_health.txt.j2 both ways from
+# fixture rows, and assert the masked copy does not contain what the full
+# copy does.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS IS SEPARATE FROM test_service_health_logic.yml
+# ---------------------------------------------------------------------------
+# The logic test runs bare: no ansible.cfg, no collections, nothing staged.
+# That is deliberate -- the code most capable of producing a wrong verdict
+# should be testable on any checkout.
+#
+# This one cannot. It calls mask_hostname, which resolves through the
+# filter_plugins path declared in ansible.cfg, and ansible.cfg is gitignored.
+# So it runs under tests/test_masking.sh, which stages a config and restores
+# whatever was there before. Same reason test_report_masking.yml does.
+#
+# Discovering this the hard way is docs/gotchas.md entry 18: the error reads
+# "Could not load mask_hostname", which points at the template rather than at
+# a search path.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS CATCHES THAT THE LOGIC TEST DOES NOT
+# ---------------------------------------------------------------------------
+# The logic test proves the verdicts are right. It says nothing about whether
+# the template can consume them, or whether it masks. A field added to the
+# template that prints row.name directly instead of going through the
+# hostname() macro would leave every logic assertion green while mailing
+# every host name in the fleet.
+#
+# So this asserts on RENDERED OUTPUT, and asserts by absence: no host name
+# the fixture supplied may appear in the masked file. That property holds no
+# matter which fields exist, which is what makes it survive template changes.
+#
+# ---------------------------------------------------------------------------
+# RUNNING
+# ---------------------------------------------------------------------------
+#   bash tests/test_masking.sh
+#
+# Not directly. See above.
+# ===========================================================================
+
+- name: Service health report masking test
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    # Template render. The fixture cases above prove the evaluation logic;
+    # they say nothing about whether the report template can consume its
+    # output, or whether it masks. A template error only surfaces at run
+    # time, and by then the report is the thing that failed.
+    #
+    # This asserts by ABSENCE, the same property test_report_masking.yml
+    # uses: no host name the fixture supplied may appear in the masked
+    # render. That holds regardless of which fields the template grows.
+    # -----------------------------------------------------------------------
+    - name: Build fixture rows for the report template
+      ansible.builtin.set_fact:
+        health_rows:
+          - name: web-01.site.example
+            reachable: true
+            verdict: FAIL
+            checks:
+              - check: service:nginx.service
+                status: FAIL
+                expected: running
+                actual: stopped
+                reason: unit is stopped, expected running
+              - check: cert:/etc/ssl/certs/service.pem
+                status: SKIP
+                expected: more than 30 days remaining
+                actual: unreadable
+                reason: expiry did not parse as an integer epoch
+          # Uncollected. Must render an absence, never a zeroed count.
+          - name: db-01.site.example
+            reachable: false
+            verdict: SKIP
+            checks: []
+            reason: no session established, nothing collected
+        health_verdict_counts:
+          PASS: 0
+          FAIL: 1
+          SKIP: 2
+
+    - name: Create the render directory
+      ansible.builtin.file:
+        path: /tmp/ansible-library-health-test
+        state: directory
+        mode: "0700"
+
+    - name: Render both copies
+      ansible.builtin.template:
+        src: ../playbooks/reporting/templates/service_health.txt.j2
+        dest: "/tmp/ansible-library-health-test/{{ item.file }}"
+        mode: "0600"
+      loop:
+        - {file: masked.txt, mask: true}
+        - {file: full.txt, mask: false}
+      loop_control:
+        label: "{{ item.file }}"
+      vars:
+        report_mask: "{{ item.mask }}"
+        report_generated: "2026-01-01 00:00:00"
+
+    - name: Read both renders back
+      ansible.builtin.slurp:
+        src: "/tmp/ansible-library-health-test/{{ item }}"
+      register: _sh_renders
+      loop: [masked.txt, full.txt]
+
+    - name: The full copy contains the real host names
+      # The control. A masking test that passes because the template renders
+      # nothing at all would be worthless.
+      ansible.builtin.assert:
+        that:
+          - "'web-01.site.example' in _sh_full"
+          - "'db-01.site.example' in _sh_full"
+        fail_msg: "The unmasked render is missing host names entirely: {{ _sh_full }}"
+        success_msg: "Unmasked render contains both host names."
+      vars:
+        _sh_full: "{{ _sh_renders.results[1].content | b64decode }}"
+
+    - name: The masked copy contains none of them
+      ansible.builtin.assert:
+        that:
+          - "'web-01.site.example' not in _sh_masked"
+          - "'db-01.site.example' not in _sh_masked"
+        fail_msg: >-
+          A host name survived into the masked render. It would have been
+          mailed. Render: {{ _sh_masked }}
+        success_msg: "No fixture host name survives into the masked render."
+      vars:
+        _sh_masked: "{{ _sh_renders.results[0].content | b64decode }}"
+
+    - name: The uncollected host renders an absence, not a zero
+      # docs/gotchas.md entry 3 at the template level. "0 failed" for a host
+      # nobody reached reads as the healthiest machine in the fleet.
+      ansible.builtin.assert:
+        that:
+          - "'NOT COLLECTED' in _sh_full"
+          - "'unknown, not healthy' in _sh_full"
+        fail_msg: "The uncollected host did not render as absent: {{ _sh_full }}"
+        success_msg: "Uncollected host renders as absent."
+      vars:
+        _sh_full: "{{ _sh_renders.results[1].content | b64decode }}"
+
+    - name: Clean up the render directory
+      ansible.builtin.file:
+        path: /tmp/ansible-library-health-test
+        state: absent

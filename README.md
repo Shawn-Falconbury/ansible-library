@@ -38,7 +38,7 @@ two diverge. Edit the repository, not the wiki.
 | Apply package updates with a verification gate | `playbooks/linux/package_updates.yml` |
 | Enumerate listening services across a fleet | `playbooks/linux/listener_sweep.yml` |
 | Distribute a wildcard certificate to many hosts | `playbooks/tls/cert_distribute.yml` |
-| Monitor service health and certificate expiry | `playbooks/reporting/service_health.yml` |
+| Monitor service health and certificate expiry | [`playbooks/reporting/service_health.yml`](playbooks/reporting/service_health.yml) |
 
 Playbooks are grouped by function rather than by the environment they came
 from. Each directory has its own README describing the group.

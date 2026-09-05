@@ -1,0 +1,61 @@
+---
+# ===========================================================================
+# run_one_health_case.yml
+#
+# Drive a single fixture case through the real evaluation logic and compare
+# every check status against what the fixture specifies.
+#
+# Divergences are ACCUMULATED rather than raised immediately. Failing on the
+# first mismatch hides the rest, and when a shared guard regresses the useful
+# signal is the full list of what broke together -- one failure looks like a
+# typo, five failures spanning every certificate case identifies the cause.
+# ===========================================================================
+
+- name: "{{ case.name }}: run the real evaluation logic"
+  # The production task file, unmodified. Testing a reimplementation would
+  # prove only that the reimplementation is self-consistent.
+  ansible.builtin.include_tasks: ../playbooks/reporting/tasks/evaluate_service_health.yml
+  vars:
+    sh_facts: "{{ case.facts }}"
+
+- name: "{{ case.name }}: index results by check name"
+  # Fold the per-host verdict in alongside the individual checks so a fixture
+  # can assert on both through one uniform lookup.
+  ansible.builtin.set_fact:
+    _sh_effective: >-
+      {{ dict(sh_results | map(attribute='check')
+              | zip(sh_results | map(attribute='status')))
+         | combine({'verdict': sh_verdict}) }}
+
+- name: "{{ case.name }}: compare each expectation against the actual status"
+  # A loop with a `when`, rather than a selectattr chain. selectattr cannot
+  # reference the element under test while also indexing another structure by
+  # that element's key.
+  ansible.builtin.set_fact:
+    _sh_failed: >-
+      {{ (_sh_failed | default([]))
+         + [case.name ~ ' :: ' ~ exp.key
+            ~ ' :: expected ' ~ exp.value
+            ~ ', got ' ~ (_sh_effective[exp.key] | default('<absent>'))] }}
+  loop: "{{ case.expect | dict2items }}"
+  loop_control:
+    loop_var: exp
+    label: "{{ exp.key }}"
+  when: exp.value != (_sh_effective[exp.key] | default('<absent>'))
+
+- name: "{{ case.name }}: count the assertions made"
+  # Counted separately from the divergence accumulator. Folding the two
+  # together would only increment on a failure, so a suite that asserted
+  # nothing at all would report zero failures and read as green.
+  ansible.builtin.set_fact:
+    _sh_assertions: >-
+      {{ (_sh_assertions | default(0) | int) + (case.expect | length) }}
+
+- name: "{{ case.name }}: show the result line"
+  ansible.builtin.debug:
+    msg: >-
+      {{ '%-40s' | format(case.name) }}
+      {{ sh_results | map(attribute='check')
+         | zip(sh_results | map(attribute='status'))
+         | map('join', '=') | join('  ') }}
+      => {{ sh_verdict }}

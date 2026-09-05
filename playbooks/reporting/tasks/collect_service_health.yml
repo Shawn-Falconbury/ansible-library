@@ -1,0 +1,140 @@
+---
+# ===========================================================================
+# tasks/collect_service_health.yml
+#
+# Collect service states and certificate expiry from a Linux host.
+# Produces sh_facts.
+#
+# Collection ONLY. Nothing here decides whether anything is healthy; that is
+# evaluate_service_health.yml, which is what keeps the thresholds testable
+# without hosts.
+#
+# ---------------------------------------------------------------------------
+# ABSENCE IS NOT A STATE
+# ---------------------------------------------------------------------------
+# ansible.builtin.service_facts reports the units it found. A unit that does
+# not exist is simply not a key in the result -- there is no 'absent' entry.
+#
+# So a typo in health_services produces a lookup miss, and the obvious
+# handling of a lookup miss is a default. `| default('running')` is
+# absurd once written down, but `| default('unknown')` compared against
+# 'running' silently becomes a FAIL, and dropping the unit from the loop
+# entirely makes it vanish from the report.
+#
+# This file therefore passes services_observed through UNMODIFIED and lets the
+# evaluation layer distinguish "not known to systemd" from "known and
+# stopped". The two need different responses and must not be merged here.
+#
+# ---------------------------------------------------------------------------
+# THE CLOCK COMES FROM THE TARGET
+# ---------------------------------------------------------------------------
+# Days-remaining is computed from now_epoch and the certificate's notAfter.
+# Both are read on the managed host, in the same run, so a control node with a
+# skewed clock cannot turn a valid certificate into an expiry warning across
+# the whole fleet at once.
+#
+# ---------------------------------------------------------------------------
+# FAILURES PRODUCE EMPTY, NEVER A NUMBER
+# ---------------------------------------------------------------------------
+# An unreadable certificate emits an empty string. It does not emit 0, and it
+# does not emit the current time. The evaluation layer's numeric guard turns
+# empty into SKIP with a reason. Emitting a number here would manufacture a
+# measurement that was never taken. See docs/gotchas.md entry 3.
+# ===========================================================================
+
+- name: Gather service states
+  ansible.builtin.service_facts:
+  register: _sh_svc
+  ignore_errors: true
+  ignore_unreachable: true
+
+- name: Record a collection failure without inventing data
+  # A host that did not answer must NOT receive an sh_facts dict full of empty
+  # defaults, or every check evaluates against those blanks and renders as a
+  # measured absence rather than an absent measurement.
+  ansible.builtin.set_fact:
+    sh_collection_failed: true
+    sh_collection_error: "{{ _sh_svc.msg | default('service_facts failed', true) }}"
+  when: >-
+    _sh_svc.failed | default(false) or _sh_svc.unreachable | default(false)
+
+- name: Read the target clock
+  ansible.builtin.command:
+    argv: [date, +%s]
+  register: _sh_now
+  changed_when: false
+  failed_when: false
+  when: not (_sh_svc.failed | default(false) or _sh_svc.unreachable | default(false))
+
+- name: Read certificate expiry as epoch seconds
+  # Emits the epoch on success and NOTHING on any failure -- missing file,
+  # unreadable by this user, not a certificate, no GNU date. Every one of
+  # those becomes an empty string, which the evaluation layer turns into an
+  # explicit SKIP naming the certificate.
+  #
+  # `|| true` on the last line and failed_when: false are deliberate and
+  # paired: the task must not abort the play, because a report that fails to
+  # render over one bad path is worse than a report that names it.
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -o pipefail
+      end=$(openssl x509 -enddate -noout -in {{ _sh_path | quote }} 2>/dev/null \
+            | cut -d= -f2) || exit 0
+      [ -n "$end" ] || exit 0
+      date -d "$end" +%s 2>/dev/null || true
+  loop: "{{ health_certificates | default([]) }}"
+  loop_control:
+    loop_var: _sh_path
+    label: "{{ _sh_path }}"
+  register: _sh_certs
+  changed_when: false
+  failed_when: false
+  when: not (_sh_svc.failed | default(false) or _sh_svc.unreachable | default(false))
+
+- name: Start empty accumulators
+  ansible.builtin.set_fact:
+    _sh_states: {}
+    _sh_cert_rows: []
+  when: not (_sh_svc.failed | default(false) or _sh_svc.unreachable | default(false))
+
+- name: Flatten service states to unit -> state
+  # service_facts returns a dict of dicts. Only the state is needed, and a
+  # loop makes the field being read visible. Units are copied across exactly
+  # as reported; nothing is added for units that were not returned.
+  ansible.builtin.set_fact:
+    _sh_states: "{{ _sh_states | combine({_sh_svc_item.key: _sh_svc_item.value.state | default('')}) }}"
+  loop: "{{ (ansible_facts.services | default({})) | dict2items }}"
+  loop_control:
+    loop_var: _sh_svc_item
+    label: "{{ _sh_svc_item.key }}"
+  when: not (_sh_svc.failed | default(false) or _sh_svc.unreachable | default(false))
+
+- name: Pair each certificate path with what was read for it
+  # Zipped by loop position would be wrong the moment a path is skipped. The
+  # path is carried on each result, so it is read back from there.
+  ansible.builtin.set_fact:
+    _sh_cert_rows: "{{ _sh_cert_rows + [_sh_cert_row] }}"
+  loop: "{{ _sh_certs.results | default([]) }}"
+  loop_control:
+    loop_var: _sh_cert_res
+    label: "{{ _sh_cert_res._sh_path | default('?') }}"
+  vars:
+    _sh_cert_row:
+      path: "{{ _sh_cert_res._sh_path | default('') }}"
+      # Empty when anything went wrong. Never 0, never the current time.
+      notafter_epoch: "{{ (_sh_cert_res.stdout | default('', true)) | trim }}"
+  when: not (_sh_svc.failed | default(false) or _sh_svc.unreachable | default(false))
+
+- name: Assemble sh_facts
+  ansible.builtin.set_fact:
+    sh_facts:
+      name: "{{ inventory_hostname }}"
+      services_expected: "{{ health_services | default([]) }}"
+      # Passed through unmodified. See the header note on absence.
+      services_observed: "{{ _sh_states }}"
+      certificates: "{{ _sh_cert_rows }}"
+      # Kept as a string on purpose. The guard in evaluate_service_health.yml
+      # has to inspect the raw text; coercing here destroys the evidence.
+      now_epoch: "{{ (_sh_now.stdout | default('', true)) | trim }}"
+  when: not (_sh_svc.failed | default(false) or _sh_svc.unreachable | default(false))

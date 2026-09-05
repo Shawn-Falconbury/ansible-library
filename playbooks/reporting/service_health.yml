@@ -1,0 +1,334 @@
+---
+# ===========================================================================
+# service_health.yml
+#
+# Check service states and certificate expiry across a fleet, report on it,
+# and optionally mail the result.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS PLAYBOOK EXISTS
+# ---------------------------------------------------------------------------
+# Reporting playbooks are where silent failures concentrate, because their
+# output is a document that looks the same whether or not it is correct. A
+# health report showing every host green is exactly what you expect to see,
+# which is why nobody examines it, which is why a broken one can run for
+# months.
+#
+# Four ways this goes quietly wrong, all of them guarded here:
+#
+#   1. Unreachable hosts are removed from the play before the reporting tasks
+#      run. A report built from the survivors cannot see them, and their
+#      absence reads as a smaller fleet rather than an outage. The host list
+#      is built from ansible_play_hosts_all. Entry 2.
+#
+#   2. A dead host has no facts. Defaulting its metrics produces a row that
+#      renders as a measurement -- "0 services failed" reads as the healthiest
+#      machine on the network. Uncollected hosts carry no metric fields at
+#      all. Entry 3.
+#
+#   3. A check that could not evaluate its input has not passed. Certificate
+#      expiry that did not parse, and units systemd has never heard of, are
+#      SKIP -- counted separately, never folded into the PASS column, and
+#      failing the run by default. Entry 16.
+#
+#   4. An empty check set is not a passing check set. A misspelled
+#      health_services produces zero checks and zero failures on every host.
+#      Entry 8, guarded both at the play level and per host.
+#
+# ---------------------------------------------------------------------------
+# REQUIRED CONFIGURATION
+# ---------------------------------------------------------------------------
+# Inventory groups
+#   linux_hosts    Linux hosts reached over SSH.
+#
+# Variables (see vars/service_health.yml.example)
+#   health_services      list of systemd unit names expected to be running
+#   health_certificates  list of certificate paths to check for expiry
+#
+# Both may be set per group or per host. A host with neither reports SKIP
+# rather than PASS, deliberately.
+#
+# For mail delivery (see vars/mail.yml.example)
+#   mail_relay_host, mail_relay_port, mail_from, mail_to, mail_subject_prefix
+#
+# ---------------------------------------------------------------------------
+# OPTIONAL VARIABLES
+# ---------------------------------------------------------------------------
+#   cert_warn_days         Days below which expiry is a FAIL. Default: 30
+#   health_report_dir      Default: {{ report_output_dir }} or ./reports
+#   health_report_name     Basename for both renders. Default: service_health
+#   health_send_mail       Mail the masked report. Default: false
+#   health_fail_on_skip    Exit non-zero if any check SKIPped. Default: true.
+#                          Unknown is not acceptable; turning this off means
+#                          accepting that some hosts were never evaluated.
+#   health_fail_on_fail    Exit non-zero on any FAIL. Default: true
+#   mask_sensitive_output  Bind no_log on the mail task. Default: true
+#
+# ---------------------------------------------------------------------------
+# ASSUMPTIONS
+# ---------------------------------------------------------------------------
+#   * ansible.cfg is staged, so filter_plugins resolves and mask_hostname is
+#     available to the template. Ansible discovers filter_plugins/ next to the
+#     PLAYBOOK; this one is two directories down, so the ansible.cfg
+#     declaration is what makes it work. See docs/gotchas.md entry 18.
+#   * openssl and GNU date exist on the managed hosts. Where they do not, the
+#     certificate checks SKIP and say so -- they do not silently pass.
+#   * become is available where certificate files are root-readable only.
+#
+# ---------------------------------------------------------------------------
+# WHAT FAILS IF MISCONFIGURED
+# ---------------------------------------------------------------------------
+#   health_services misspelled     Every host SKIPs its service checks and the
+#                                  run fails, naming them. It does NOT report
+#                                  a clean fleet.
+#   Unit name misspelled           That unit is SKIP with "not known to
+#                                  systemd", not FAIL and not PASS.
+#   Certificate unreadable         SKIP naming the path. Not "expired 20454
+#                                  days ago", which is what a 0 epoch yields.
+#   ansible.cfg not staged         TemplateAssertionError: No filter named
+#                                  'mask_hostname'. Points at the template,
+#                                  which is the wrong place to look.
+#   Group named incorrectly        Zero hosts, an empty but well-formed
+#                                  report, exit 0. The first assert guards it.
+#
+# ---------------------------------------------------------------------------
+# USAGE
+# ---------------------------------------------------------------------------
+#   ansible-playbook playbooks/reporting/service_health.yml
+#   ansible-playbook playbooks/reporting/service_health.yml \
+#       -e health_send_mail=true
+#   ansible-playbook playbooks/reporting/service_health.yml \
+#       -e cert_warn_days=14 --limit linux_hosts
+# ===========================================================================
+
+- name: Collect service and certificate health
+  hosts: linux_hosts
+  gather_facts: false
+  # No connection: keyword. ansible_connection lives in group_vars and
+  # outranks a play-level value silently. See docs/gotchas.md entry 4.
+
+  vars:
+    # Defined at PLAY level, deliberately, not on the include below.
+    #
+    # `x: "{{ x | default(30) }}"` in a TASK's vars: is self-referential: the
+    # right-hand x resolves to the same task var, and templating recurses
+    # until the stack blows. At play level the right-hand side resolves
+    # against higher-precedence scopes -- extra-vars, inventory -- so the
+    # idiom works. The two forms look identical and behave completely
+    # differently.
+    #
+    # ansible-lint caught this as "recursive loop detected". Without a lint
+    # run it would have surfaced only at execution, on the first real host.
+    cert_warn_days: "{{ cert_warn_days | default(30) }}"
+
+  tasks:
+    - name: Collect health inputs
+      ansible.builtin.include_tasks: tasks/collect_service_health.yml
+
+    - name: Evaluate the collected inputs
+      # Evaluation runs per host but touches nothing on it -- every input is
+      # already in sh_facts. That is what lets the same file run against
+      # fixtures in tests/test_service_health_logic.yml.
+      ansible.builtin.include_tasks: tasks/evaluate_service_health.yml
+      when: not (sh_collection_failed | default(false))
+
+- name: Report on service and certificate health
+  hosts: linux_hosts
+  gather_facts: false
+  # Declared, not inherited. run_once picks one host and depends on ordering
+  # the free strategy does not guarantee.
+  strategy: linear
+  # run_once and delegate_to are TASK keywords. On a play they parse as valid
+  # YAML and fail at run time. See docs/gotchas.md entry 15.
+
+  vars:
+    health_report_dir: >-
+      {{ health_report_dir | default(report_output_dir | default('./reports')) }}
+    health_report_name: "{{ health_report_name | default('service_health') }}"
+    health_fail_on_skip: "{{ health_fail_on_skip | default(true) }}"
+    health_fail_on_fail: "{{ health_fail_on_fail | default(true) }}"
+    health_send_mail: "{{ health_send_mail | default(false) }}"
+    cert_warn_days: "{{ cert_warn_days | default(30) }}"
+
+    _sh_masked_path: "{{ health_report_dir }}/{{ health_report_name }}.txt"
+    _sh_full_path: "{{ health_report_dir }}/{{ health_report_name }}-full.txt"
+
+    # ansible_play_hosts_all is resolved with ignore_restrictions, so it still
+    # holds hosts that went unreachable during collection. That is the only
+    # reason a dead host can appear in this report at all.
+    _sh_hosts_all: "{{ ansible_play_hosts_all }}"
+
+  tasks:
+    - name: Guard against an empty play
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.assert:
+        that:
+          - _sh_hosts_all | length > 0
+        fail_msg: >-
+          The play matched zero hosts. Check that the inventory group
+          'linux_hosts' exists and is populated. An empty run is not a passing
+          run. See docs/gotchas.md entry 8.
+        success_msg: "{{ _sh_hosts_all | length }} host(s) in scope."
+
+    - name: Build the report rows
+      # apply:, not bare run_once/delegate_to -- those are not valid
+      # attributes of a TaskInclude and are rejected at syntax-check.
+      ansible.builtin.include_tasks:
+        file: tasks/build_health_rows.yml
+        apply:
+          run_once: true
+          delegate_to: localhost
+      run_once: true
+
+    - name: Ensure the report directory exists
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.file:
+        path: "{{ health_report_dir }}"
+        state: directory
+        mode: "0750"
+
+    - name: Render the archive copy
+      run_once: true
+      delegate_to: localhost
+      # Written first, at 0600. If the masked render fails, the full data
+      # still exists on the control node rather than the run producing
+      # nothing at all.
+      ansible.builtin.template:
+        # Bare filename. Ansible searches templates/ beside the playbook, so
+        # this stays correct if the directory moves. A ../../ path does not.
+        src: service_health.txt.j2
+        dest: "{{ _sh_full_path }}"
+        mode: "0600"
+      vars:
+        report_mask: false
+        report_generated: "{{ '%Y-%m-%d %H:%M:%S' | strftime }}"
+
+    - name: Render the distribution copy
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.template:
+        src: service_health.txt.j2
+        dest: "{{ _sh_masked_path }}"
+        mode: "0640"
+      vars:
+        report_mask: true
+        report_generated: "{{ '%Y-%m-%d %H:%M:%S' | strftime }}"
+
+    - name: Scan the distribution copy for unmasked environment data
+      run_once: true
+      delegate_to: localhost
+      # The masking filters and the leak checker are independent
+      # implementations of the same rule. Running the checker over the render
+      # is what makes them agree in practice: a field added to the template
+      # that bypasses the masking macro leaves the filter tests green, and
+      # this catches it before the report is mailed.
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../../scripts/leak_check.py"
+          - "{{ _sh_masked_path }}"
+      register: _sh_leak_scan
+      changed_when: false
+      failed_when: false
+
+    - name: Refuse to distribute a report that failed the scan
+      run_once: true
+      delegate_to: localhost
+      # Before the mail task, deliberately. A report that fails this check
+      # must not leave the control node.
+      ansible.builtin.assert:
+        that:
+          - _sh_leak_scan.rc == 0
+        fail_msg: >-
+          The masked report at {{ _sh_masked_path }} contains data the leak
+          checker rejected, and has NOT been sent. It was not deleted --
+          inspect it, and treat it as unmasked until you know why. Scanner
+          output: {{ _sh_leak_scan.stderr | default(_sh_leak_scan.stdout) | trim }}
+        success_msg: "Masked report passed the leak scan."
+
+    - name: Mail the masked report
+      run_once: true
+      delegate_to: localhost
+      community.general.mail:
+        host: "{{ mail_relay_host }}"
+        port: "{{ mail_relay_port | default(25) }}"
+        from: "{{ mail_from }}"
+        to: "{{ mail_to }}"
+        subject: >-
+          {{ mail_subject_prefix | default('[ansible]') }}
+          service health: {{ _sh_counts.FAIL }} failed,
+          {{ _sh_counts.SKIP }} unevaluated,
+          {{ _sh_counts.PASS }} healthy
+        body: "{{ lookup('ansible.builtin.file', _sh_masked_path) }}"
+      vars:
+        _sh_counts: "{{ health_verdict_counts }}"
+      # Bound to the toggle, not hardcoded. A hardcoded no_log censors the
+      # error text too, which makes a relay authentication failure
+      # undebuggable. Paired with ignore_errors and the assert below so the
+      # failure still surfaces by name without printing anything sensitive.
+      # See docs/gotchas.md entry 9.
+      no_log: "{{ mask_sensitive_output | default(true) }}"
+      ignore_errors: true
+      register: _sh_mail
+      when: health_send_mail | bool
+
+    - name: Surface a mail failure without printing the relay configuration
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.assert:
+        that:
+          - not (_sh_mail.failed | default(false))
+        fail_msg: >-
+          The report was rendered and scanned but could not be sent. Check
+          mail_relay_host, mail_relay_port and network reachability to the
+          relay. Re-run with -e mask_sensitive_output=false to see the
+          underlying error. The report is still at {{ _sh_masked_path }}.
+        success_msg: "Report sent to {{ mail_to | length }} recipient(s)."
+      when: health_send_mail | bool
+
+    - name: Summarise to stdout
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.debug:
+        msg:
+          - "Hosts in scope:  {{ health_rows | length }}"
+          - "Collected:       {{ health_rows | selectattr('reachable') | list | length }}"
+          - "Not collected:   {{ health_rows | rejectattr('reachable') | list | length }}"
+          - "Checks PASS:     {{ health_verdict_counts.PASS }}"
+          - "Checks FAIL:     {{ health_verdict_counts.FAIL }}"
+          - "Checks SKIP:     {{ health_verdict_counts.SKIP }}  (unevaluated, not healthy)"
+          - "Distribution:    {{ _sh_masked_path }} (0640, masked)"
+          - "Archive:         {{ _sh_full_path }} (0600, full)"
+
+    - name: Fail on unevaluated checks
+      run_once: true
+      delegate_to: localhost
+      # Deliberately after the report is written and sent. A run that fails
+      # before producing its artefact is much harder to triage.
+      #
+      # This assert exists because SKIP is the status most likely to be
+      # ignored. It is not a failure, so it does not draw attention; it is not
+      # a pass, so treating it as one is exactly the mistake in entry 16.
+      ansible.builtin.assert:
+        that:
+          - health_verdict_counts.SKIP | int == 0
+        fail_msg: >-
+          {{ health_verdict_counts.SKIP }} check(s) could not be evaluated and
+          were NOT counted as healthy:
+          {{ health_skipped_summary | join('; ') }}
+        success_msg: "Every check produced a verdict."
+      when: health_fail_on_skip | bool
+
+    - name: Fail on failed checks
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.assert:
+        that:
+          - health_verdict_counts.FAIL | int == 0
+        fail_msg: >-
+          {{ health_verdict_counts.FAIL }} check(s) failed:
+          {{ health_failed_summary | join('; ') }}
+        success_msg: "Every evaluated check passed."
+      when: health_fail_on_fail | bool

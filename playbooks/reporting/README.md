@@ -4,7 +4,7 @@ Health reporting and notification.
 
 | Playbook | Status | Purpose |
 |---|---|---|
-| `service_health.yml` | planned | Service and certificate-expiry monitoring with unreachable-host detection. |
+| `service_health.yml` | complete | Service state and certificate-expiry monitoring with unreachable-host detection. Dual-rendered, leak-scanned before send, optional mail. Evaluation is a separate task file: 11 fixture cases, 33 assertions, no hosts. |
 
 ## Pattern
 

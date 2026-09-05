@@ -102,7 +102,7 @@ single hardcoded mode either breaks the service or over-shares the key.
 
 | Playbook | Status | Purpose |
 |---|---|---|
-| `service_health.yml` | 🔜 planned | Service and certificate-expiry monitoring with unreachable-host detection. |
+| `service_health.yml` | ✅ complete | Service state and certificate-expiry monitoring with unreachable-host detection. Dual-rendered to text, leak-scanned **before** the mail step, optional delivery. Evaluation lives in its own task file — 11 fixture cases, 33 assertions, no hosts required. |
 
 **Reporting playbooks are where silent failures concentrate**, because their
 output is a document that looks the same whether or not it is correct. Three

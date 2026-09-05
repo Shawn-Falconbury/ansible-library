@@ -1,0 +1,26 @@
+---
+# Copy to vars/service_health.yml. Consumed by
+# playbooks/reporting/service_health.yml.
+#
+# Both lists may also be set per group or per host in group_vars/host_vars,
+# which is usually what you want -- a database host and a web host do not run
+# the same units.
+#
+# A host with neither list set reports SKIP, not PASS. Nothing configured is
+# not the same as nothing wrong.
+
+# systemd units expected to be running. Use the full unit name including the
+# suffix; that is what service_facts reports, and a name that does not match
+# SKIPs with "not known to systemd" rather than failing or passing quietly.
+health_services:
+  - sshd.service
+  - nginx.service
+  - chronyd.service
+
+# Certificate paths checked for expiry. A path that cannot be read SKIPs and
+# names itself in the report; it does not report as expired.
+health_certificates:
+  - /etc/ssl/certs/service.pem
+
+# Days remaining below which expiry is a FAIL.
+cert_warn_days: 30

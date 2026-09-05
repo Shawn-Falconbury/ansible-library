@@ -1,0 +1,204 @@
+---
+# ===========================================================================
+# tasks/evaluate_service_health.yml
+#
+# Evaluate collected health data. Produces sh_results and sh_verdict.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS IS A SEPARATE FILE
+# ---------------------------------------------------------------------------
+# No host access happens here. Everything arrives in sh_facts, already
+# gathered by tasks/collect_service_health.yml.
+#
+# That split is what makes the logic testable. Threshold and comparison code
+# is where the silent-failure bugs live, and it is exactly the code you cannot
+# exercise in CI while it is welded to a live host. Separated, it runs against
+# recorded fixtures on localhost and the guards can be proven to fire.
+#
+# ---------------------------------------------------------------------------
+# INPUT: sh_facts
+# ---------------------------------------------------------------------------
+#   name                str   Host identifier, for reporting only.
+#   services_expected   list  Unit names that are supposed to be running.
+#   services_observed   dict  unit -> state string, as systemd reported it.
+#                             A unit MISSING from this dict was not known to
+#                             systemd at all, which is different from a unit
+#                             known to be stopped.
+#   certificates        list  of {path, notafter_epoch}. notafter_epoch is a
+#                             STRING and may be empty.
+#   now_epoch           str   Target's clock at collection time. String.
+#
+# The epoch fields are deliberately strings. They arrive as command output and
+# the whole point of the numeric guard is to interrogate that text before
+# trusting it. Coercing on the way in destroys the evidence the guard needs.
+# See docs/gotchas.md entry 6.
+#
+# ---------------------------------------------------------------------------
+# OUTPUT: sh_results
+# ---------------------------------------------------------------------------
+# A list of dicts, one per check:
+#   check     str  service:<unit> | cert:<path> | services | certificates
+#   status    str  PASS | FAIL | SKIP
+#   expected  str
+#   actual    str
+#   reason    str  Present on SKIP and FAIL.
+#
+# SKIP is first-class and is NEVER equivalent to PASS. A check that could not
+# evaluate its input has not passed. See docs/gotchas.md entry 16.
+# ===========================================================================
+
+- name: Reset per-host evaluation state
+  # Facts persist across loop iterations. Without an explicit reset a host
+  # that produces no value inherits the previous host's results, and the
+  # report shows a plausible verdict computed from someone else's data.
+  ansible.builtin.set_fact:
+    sh_results: []
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+
+- name: Record that no services were configured to check
+  # An empty expectation list produces zero checks, zero failures, and a host
+  # that reads as healthy. That is docs/gotchas.md entry 8 one level down: an
+  # empty check set is not a passing check set. A misspelled variable name
+  # lands here rather than silently reporting a clean host.
+  ansible.builtin.set_fact:
+    sh_results: "{{ sh_results + [_sh_row] }}"
+  vars:
+    _sh_row:
+      check: services
+      status: SKIP
+      expected: at least one unit
+      actual: none configured
+      reason: >-
+        health_services is empty or undefined -- no service was evaluated on
+        this host. An empty check set is not a pass.
+  when: (sh_facts.services_expected | default([])) | length == 0
+
+- name: Evaluate each expected service
+  ansible.builtin.set_fact:
+    sh_results: "{{ sh_results + [_sh_row] }}"
+  loop: "{{ sh_facts.services_expected | default([]) }}"
+  loop_control:
+    loop_var: _sh_unit
+    label: "{{ _sh_unit }}"
+  vars:
+    _sh_observed: "{{ sh_facts.services_observed | default({}) }}"
+
+    # Known to systemd at all. This is the distinction that matters: a unit
+    # absent from service_facts was never observed, which is not the same as
+    # a unit observed to be stopped.
+    _sh_known: "{{ _sh_unit in _sh_observed }}"
+    _sh_state: "{{ _sh_observed[_sh_unit] | default('') }}"
+
+    _sh_row: >-
+      {{
+        {
+          'check': 'service:' ~ _sh_unit,
+          'status': 'SKIP',
+          'expected': 'running',
+          'actual': 'not known to systemd',
+          'reason': 'no unit by this name was reported. Either the unit is not
+                     installed or the name in health_services is wrong -- both
+                     mean the service was NOT checked, which is not a pass.'
+        }
+        if not (_sh_known | bool) else
+        {
+          'check': 'service:' ~ _sh_unit,
+          'status': ('PASS' if _sh_state == 'running' else 'FAIL'),
+          'expected': 'running',
+          'actual': _sh_state,
+          'reason': ('' if _sh_state == 'running'
+                     else 'unit is ' ~ _sh_state ~ ', expected running')
+        }
+      }}
+
+# ---------------------------------------------------------------------------
+# Certificate expiry
+# ---------------------------------------------------------------------------
+
+- name: Record that no certificates were configured to check
+  ansible.builtin.set_fact:
+    sh_results: "{{ sh_results + [_sh_row] }}"
+  vars:
+    _sh_row:
+      check: certificates
+      status: SKIP
+      expected: at least one path
+      actual: none configured
+      reason: >-
+        health_certificates is empty or undefined -- no certificate expiry was
+        evaluated on this host.
+  when: (sh_facts.certificates | default([])) | length == 0
+
+- name: Evaluate each certificate's expiry
+  ansible.builtin.set_fact:
+    sh_results: "{{ sh_results + [_sh_row] }}"
+  loop: "{{ sh_facts.certificates | default([]) }}"
+  loop_control:
+    loop_var: _sh_cert
+    label: "{{ _sh_cert.path | default('?') }}"
+  vars:
+    _sh_na: "{{ _sh_cert.notafter_epoch | default('') | string }}"
+    _sh_now: "{{ sh_facts.now_epoch | default('') | string }}"
+
+    # The guard. Both values must be bare integers.
+    #
+    # `| int` on anything else returns 0 with no error, and 0 is a perfectly
+    # usable number: it flows through the subtraction, produces a plausible
+    # day count, and the check reports a verdict it never actually computed.
+    # An unreadable certificate would come out as "expired 20454 days ago",
+    # which looks like a finding rather than a failure to measure.
+    #
+    # `is match` anchors at the start, so the trailing $ is what stops
+    # "1780000000; rm -rf" and "12 days" from being accepted.
+    # See docs/gotchas.md entry 6.
+    _sh_numeric: >-
+      {{ _sh_na is match('^[0-9]+$') and _sh_now is match('^[0-9]+$') }}
+
+    # Floor, not round. A certificate with 29.6 days left has 29 days left;
+    # rounding it up to 30 would let it slip past a 30-day threshold on the
+    # one day the warning mattered.
+    _sh_days: >-
+      {{ (((_sh_na | int) - (_sh_now | int)) / 86400) | round(0, 'floor') | int }}
+
+    _sh_row: >-
+      {{
+        {
+          'check': 'cert:' ~ (_sh_cert.path | default('?')),
+          'status': 'SKIP',
+          'expected': 'more than ' ~ (cert_warn_days | string) ~ ' days remaining',
+          'actual': 'unreadable',
+          'reason': 'expiry did not parse as an integer epoch (got '
+                    ~ (_sh_na | truncate(40, true) | default('empty', true) | string)
+                    ~ '). The certificate was NOT checked -- it may be missing,
+                    unreadable by this user, or not a certificate.'
+        }
+        if not (_sh_numeric | bool) else
+        {
+          'check': 'cert:' ~ (_sh_cert.path | default('?')),
+          'status': ('FAIL' if (_sh_days | int) < (cert_warn_days | int) else 'PASS'),
+          'expected': 'more than ' ~ (cert_warn_days | string) ~ ' days remaining',
+          'actual': (_sh_days | string) ~ ' days',
+          'reason': ('' if (_sh_days | int) >= (cert_warn_days | int)
+                     else ('expired ' ~ ((_sh_days | int) * -1) | string ~ ' days ago'
+                           if (_sh_days | int) < 0
+                           else 'expires in ' ~ (_sh_days | string) ~ ' days'))
+        }
+      }}
+
+# ---------------------------------------------------------------------------
+# Verdict
+# ---------------------------------------------------------------------------
+
+- name: Summarise host verdict
+  ansible.builtin.set_fact:
+    sh_verdict: >-
+      {{ 'FAIL' if sh_results | selectattr('status', 'eq', 'FAIL') | list | length > 0
+         else ('SKIP' if sh_results | selectattr('status', 'eq', 'SKIP') | list | length > 0
+               else 'PASS') }}
+    # A host with any SKIP is NOT healthy. It is unevaluated. Rolling SKIP up
+    # into PASS is the error this repository exists to document -- if the
+    # summary only counts FAILs, a host whose checks all skipped is
+    # indistinguishable from a clean one. See docs/gotchas.md entry 16.

@@ -1,0 +1,141 @@
+---
+# ===========================================================================
+# tasks/build_health_rows.yml
+#
+# Turn per-host sh_results into the row list the report template consumes,
+# plus the counts the play asserts on.
+#
+# INPUT
+#   _sh_hosts_all   hostnames the play targeted, INCLUDING any that went
+#                   unreachable during collection
+#   hostvars[h].sh_results / sh_verdict
+#                   set by tasks/evaluate_service_health.yml on hosts that
+#                   answered; absent on hosts that did not
+#
+# OUTPUT
+#   health_rows             one dict per host in _sh_hosts_all
+#   health_verdict_counts   {PASS, FAIL, SKIP} across every CHECK
+#   health_skipped_summary  list of "host :: check -- reason"
+#   health_failed_summary   list of "host :: check -- reason"
+#
+# ---------------------------------------------------------------------------
+# THE RULE
+# ---------------------------------------------------------------------------
+# Iterate over _sh_hosts_all. Never over ansible_play_hosts, never over
+# hostvars.
+#
+# Unreachable hosts are gone from ansible_play_hosts by the time this runs. A
+# list built from the survivors is internally consistent, correctly
+# formatted, and missing exactly the hosts somebody needed to know about.
+# See docs/gotchas.md entry 2.
+#
+# A host that produced no results is NOT given zero counts. Zero failures
+# renders as a measurement and reads as the healthiest machine in the fleet.
+# It gets reachable: false, an empty check list, and it contributes a SKIP to
+# the totals -- because an uncollected host is unevaluated, not healthy.
+# See entries 3 and 16.
+# ===========================================================================
+
+- name: Start from empty accumulators
+  # Explicit rather than `| default([])` inside the accumulators. Re-running
+  # this file in one process would otherwise append to the previous pass and
+  # silently double the report.
+  ansible.builtin.set_fact:
+    health_rows: []
+    health_skipped_summary: []
+    health_failed_summary: []
+
+- name: Build one row per targeted host
+  ansible.builtin.set_fact:
+    health_rows: "{{ health_rows + [_sh_row] }}"
+  loop: "{{ _sh_hosts_all }}"
+  loop_control:
+    loop_var: _sh_host
+    label: "{{ _sh_host }}"
+  vars:
+    _sh_hv: "{{ hostvars[_sh_host] | default({}) }}"
+
+    # Decided once. Inlining it into the row expression would put the
+    # definition of "collected" in several places in one Jinja expression,
+    # and they would stop agreeing.
+    _sh_ok: >-
+      {{ ('sh_results' in _sh_hv)
+         and not (_sh_hv.sh_collection_failed | default(false) | bool) }}
+
+    _sh_reason: >-
+      {{ _sh_hv.sh_collection_error
+         | default('no session established, nothing collected', true) }}
+
+    # Written out in full rather than merged with combine(). A merge would
+    # make the uncollected row "the collected row minus some fields", so a
+    # field added later would appear in both by default -- the wrong default.
+    _sh_row: >-
+      {{
+        {
+          'name': _sh_host,
+          'reachable': true,
+          'verdict': _sh_hv.sh_verdict | default('SKIP'),
+          'checks': _sh_hv.sh_results | default([])
+        }
+        if _sh_ok | bool else
+        {
+          'name': _sh_host,
+          'reachable': false,
+          'verdict': 'SKIP',
+          'checks': [],
+          'reason': _sh_reason
+        }
+      }}
+
+- name: Confirm every targeted host produced exactly one row
+  # The task above is a loop with a conditional inside it, which is the shape
+  # that silently drops an element. A short row list is otherwise
+  # indistinguishable from a small fleet.
+  ansible.builtin.assert:
+    that:
+      - health_rows | length == _sh_hosts_all | length
+      - (health_rows | map(attribute='name') | list | sort) == (_sh_hosts_all | list | sort)
+    fail_msg: >-
+      Row assembly dropped hosts. Targeted {{ _sh_hosts_all | length }},
+      produced {{ health_rows | length }}. Missing:
+      {{ _sh_hosts_all | difference(health_rows | map(attribute='name') | list) | join(', ') }}
+    success_msg: >-
+      {{ health_rows | length }} row(s) for {{ _sh_hosts_all | length }}
+      targeted host(s).
+
+- name: Collect the SKIP and FAIL detail
+  # Counts alone are not actionable. "3 unevaluated" and "3 unevaluated, all
+  # of them the same certificate path" lead to different next steps.
+  ansible.builtin.set_fact:
+    health_skipped_summary: >-
+      {{ health_skipped_summary
+         + (_sh_row.checks | selectattr('status', 'eq', 'SKIP')
+            | map(attribute='check')
+            | map('regex_replace', '^', _sh_row.name ~ ' :: ') | list)
+         + ([] if _sh_row.reachable
+            else [_sh_row.name ~ ' :: host -- ' ~ (_sh_row.reason | default(''))]) }}
+    health_failed_summary: >-
+      {{ health_failed_summary
+         + (_sh_row.checks | selectattr('status', 'eq', 'FAIL')
+            | map(attribute='check')
+            | map('regex_replace', '^', _sh_row.name ~ ' :: ') | list) }}
+  loop: "{{ health_rows }}"
+  loop_control:
+    loop_var: _sh_row
+    label: "{{ _sh_row.name }}"
+
+- name: Count check outcomes across the fleet
+  ansible.builtin.set_fact:
+    health_verdict_counts:
+      PASS: "{{ _sh_all_checks | selectattr('status', 'eq', 'PASS') | list | length }}"
+      FAIL: "{{ _sh_all_checks | selectattr('status', 'eq', 'FAIL') | list | length }}"
+      # An uncollected host contributes a SKIP even though it produced no
+      # checks. Counting only the checks that exist would let a host that was
+      # never reached vanish from the totals entirely -- which is entry 2
+      # again, one level up from the row list.
+      SKIP: >-
+        {{ (_sh_all_checks | selectattr('status', 'eq', 'SKIP') | list | length)
+           + (health_rows | rejectattr('reachable') | list | length) }}
+  vars:
+    _sh_all_checks: >-
+      {{ health_rows | map(attribute='checks') | flatten }}

@@ -115,10 +115,15 @@ jobs:
       - name: Inventory row assembly test
         run: ansible-playbook -i localhost, tests/test_inventory_assembly.yml
 
-      - name: Report masking test
-        # Config is already staged by the step above, so the playbook can
+      - name: Service health logic test
+        run: ansible-playbook -i localhost, tests/test_service_health_logic.yml
+
+      - name: Report masking tests
+        # Config is already staged by the step above, so the playbooks can
         # be invoked directly rather than through tests/test_masking.sh.
-        run: ansible-playbook -i localhost, tests/test_report_masking.yml
+        run: |
+          ansible-playbook -i localhost, tests/test_report_masking.yml
+          ansible-playbook -i localhost, tests/test_health_report_masking.yml
 
       - name: Install pinned collections
         # Retried, because this step reaches out to galaxy.ansible.com and a

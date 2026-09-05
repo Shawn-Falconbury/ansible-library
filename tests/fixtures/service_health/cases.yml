@@ -1,0 +1,242 @@
+---
+# Fixture set for playbooks/reporting/tasks/evaluate_service_health.yml
+#
+# Each case supplies an sh_facts dictionary and the status every check MUST
+# return. The harness asserts the exact status, so a guard that stops firing
+# fails a specific named case rather than quietly widening what passes.
+#
+# All values are synthetic. Nothing here was recorded from a real host.
+#
+# Epochs are fixed rather than computed from "now". A fixture that says
+# "now + 45 days" tests a different thing every day it runs, and the day it
+# starts failing tells you nothing about what changed.
+#
+#   now      1780000000
+#   +45d     1783888000
+#   +10d     1780864000
+#   -5d      1779568000
+
+service_health_cases:
+
+  # -----------------------------------------------------------------------
+  # THE CASE THIS FILE EXISTS FOR.
+  # A certificate that could not be read yields an empty epoch. Unguarded,
+  # `'' | int` is 0, and 0 - 1780000000 is a large negative number that
+  # divides cleanly into "expired 20601 days ago". That renders as a finding
+  # -- a specific, plausible, actionable-looking one -- for a check that was
+  # never performed. The guard must force SKIP.
+  # -----------------------------------------------------------------------
+  - name: unreadable_cert_must_skip
+    description: >-
+      An empty expiry must SKIP, never FAIL with a fabricated day count.
+      A missing measurement is not a measurement of zero.
+    facts:
+      name: host-fixture-01
+      services_expected: [nginx.service]
+      services_observed:
+        nginx.service: running
+      certificates:
+        - path: /etc/ssl/certs/missing.pem
+          notafter_epoch: ""
+      now_epoch: "1780000000"
+    expect:
+      "service:nginx.service": PASS
+      "cert:/etc/ssl/certs/missing.pem": SKIP
+      verdict: SKIP
+
+  # -----------------------------------------------------------------------
+  # Same shape, non-numeric rather than empty. openssl printing a warning,
+  # or `date` echoing back its input, both land here.
+  # -----------------------------------------------------------------------
+  - name: nonnumeric_cert_must_skip
+    description: Expiry text that is not a bare integer must SKIP.
+    facts:
+      name: host-fixture-02
+      services_expected: [nginx.service]
+      services_observed:
+        nginx.service: running
+      certificates:
+        - path: /etc/ssl/certs/garbage.pem
+          notafter_epoch: "Jun  9 12:00:00 2026 GMT"
+      now_epoch: "1780000000"
+    expect:
+      "service:nginx.service": PASS
+      "cert:/etc/ssl/certs/garbage.pem": SKIP
+      verdict: SKIP
+
+  # -----------------------------------------------------------------------
+  # A guard that rejects everything is as broken as one that accepts
+  # everything, and it fails in the direction that looks responsible. These
+  # two prove a real verdict still gets computed.
+  # -----------------------------------------------------------------------
+  - name: valid_cert_far_out_must_pass
+    description: 45 days remaining, threshold 30. Genuine PASS.
+    facts:
+      name: host-fixture-03
+      services_expected: [nginx.service]
+      services_observed:
+        nginx.service: running
+      certificates:
+        - path: /etc/ssl/certs/good.pem
+          notafter_epoch: "1783888000"
+      now_epoch: "1780000000"
+    expect:
+      "service:nginx.service": PASS
+      "cert:/etc/ssl/certs/good.pem": PASS
+      verdict: PASS
+
+  - name: cert_inside_threshold_must_fail
+    description: 10 days remaining, threshold 30. Genuine FAIL.
+    facts:
+      name: host-fixture-04
+      services_expected: [nginx.service]
+      services_observed:
+        nginx.service: running
+      certificates:
+        - path: /etc/ssl/certs/soon.pem
+          notafter_epoch: "1780864000"
+      now_epoch: "1780000000"
+    expect:
+      "service:nginx.service": PASS
+      "cert:/etc/ssl/certs/soon.pem": FAIL
+      verdict: FAIL
+
+  - name: expired_cert_must_fail
+    description: Already expired. FAIL, and distinguishable from unreadable.
+    facts:
+      name: host-fixture-05
+      services_expected: [nginx.service]
+      services_observed:
+        nginx.service: running
+      certificates:
+        - path: /etc/ssl/certs/expired.pem
+          notafter_epoch: "1779568000"
+      now_epoch: "1780000000"
+    expect:
+      "service:nginx.service": PASS
+      "cert:/etc/ssl/certs/expired.pem": FAIL
+      verdict: FAIL
+
+  # -----------------------------------------------------------------------
+  # A skewed or unreadable clock invalidates every certificate comparison on
+  # the host. It must not invalidate them into PASS.
+  # -----------------------------------------------------------------------
+  - name: unreadable_clock_must_skip_all_certs
+    description: >-
+      No now_epoch means no comparison is possible. Every certificate SKIPs;
+      the service checks are unaffected and still report normally.
+    facts:
+      name: host-fixture-06
+      services_expected: [nginx.service]
+      services_observed:
+        nginx.service: running
+      certificates:
+        - path: /etc/ssl/certs/good.pem
+          notafter_epoch: "1783888000"
+      now_epoch: ""
+    expect:
+      "service:nginx.service": PASS
+      "cert:/etc/ssl/certs/good.pem": SKIP
+      verdict: SKIP
+
+  # -----------------------------------------------------------------------
+  # A unit systemd never reported. This is a TYPO in health_services, or a
+  # unit that is not installed. Either way the service was not checked.
+  #
+  # FAIL would be wrong -- it asserts the service is down, which was never
+  # observed. PASS is obviously wrong. SKIP is the only honest verdict, and
+  # the run fails on SKIP by default so it still gets attention.
+  # -----------------------------------------------------------------------
+  - name: unknown_unit_must_skip_not_fail
+    description: >-
+      A unit absent from service_facts must SKIP. Absence is not a state.
+    facts:
+      name: host-fixture-07
+      services_expected: [ngnix.service]
+      services_observed:
+        nginx.service: running
+      certificates: []
+      now_epoch: "1780000000"
+    expect:
+      "service:ngnix.service": SKIP
+      certificates: SKIP
+      verdict: SKIP
+
+  - name: stopped_unit_must_fail
+    description: >-
+      A unit that IS known and is not running. Distinct from the case above,
+      and this one really is a FAIL.
+    facts:
+      name: host-fixture-08
+      services_expected: [nginx.service]
+      services_observed:
+        nginx.service: stopped
+      certificates: []
+      now_epoch: "1780000000"
+    expect:
+      "service:nginx.service": FAIL
+      certificates: SKIP
+      verdict: FAIL
+
+  # -----------------------------------------------------------------------
+  # An empty check set is not a passing check set. A misspelled
+  # health_services variable produces exactly this on every host in the
+  # fleet: zero checks, zero failures, and a clean report.
+  # See docs/gotchas.md entry 8.
+  # -----------------------------------------------------------------------
+  - name: no_services_configured_must_skip
+    description: >-
+      Nothing configured to check must SKIP, not PASS by vacuum.
+    facts:
+      name: host-fixture-09
+      services_expected: []
+      services_observed:
+        nginx.service: running
+      certificates: []
+      now_epoch: "1780000000"
+    expect:
+      services: SKIP
+      certificates: SKIP
+      verdict: SKIP
+
+  # -----------------------------------------------------------------------
+  # FAIL outranks SKIP in the verdict. A host with one broken service and
+  # one unreadable certificate is failing, not merely unevaluated -- the
+  # verdict must not soften.
+  # -----------------------------------------------------------------------
+  - name: fail_outranks_skip_in_verdict
+    description: A host with both a FAIL and a SKIP reports FAIL.
+    facts:
+      name: host-fixture-10
+      services_expected: [nginx.service]
+      services_observed:
+        nginx.service: stopped
+      certificates:
+        - path: /etc/ssl/certs/missing.pem
+          notafter_epoch: ""
+      now_epoch: "1780000000"
+    expect:
+      "service:nginx.service": FAIL
+      "cert:/etc/ssl/certs/missing.pem": SKIP
+      verdict: FAIL
+
+  # -----------------------------------------------------------------------
+  # Boundary. Exactly at the threshold is not below it, so it passes. Stated
+  # as a case rather than left to the reader, because < and <= differ by one
+  # day here and the difference only shows up on that day.
+  # -----------------------------------------------------------------------
+  - name: cert_exactly_at_threshold_must_pass
+    description: 30 days remaining against a 30-day threshold. Not below it.
+    facts:
+      name: host-fixture-11
+      services_expected: [nginx.service]
+      services_observed:
+        nginx.service: running
+      certificates:
+        - path: /etc/ssl/certs/edge.pem
+          notafter_epoch: "1782592000"
+      now_epoch: "1780000000"
+    expect:
+      "service:nginx.service": PASS
+      "cert:/etc/ssl/certs/edge.pem": PASS
+      verdict: PASS

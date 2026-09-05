@@ -48,5 +48,11 @@ trap cleanup EXIT
 
 cp ansible.cfg.example ansible.cfg
 
-ansible-playbook -i localhost, tests/test_report_masking.yml
-exit $?
+# Both masking tests run under the same staged config. Kept in one wrapper
+# rather than two: duplicating the stage/restore logic would mean two copies
+# that can disagree about what "staged" means, and the second copy is the one
+# nobody updates.
+RC=0
+ansible-playbook -i localhost, tests/test_report_masking.yml || RC=1
+ansible-playbook -i localhost, tests/test_health_report_masking.yml || RC=1
+exit $RC

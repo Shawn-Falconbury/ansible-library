@@ -71,6 +71,12 @@ echo "== inventory row assembly (fixture-driven) ====================="
 ansible-playbook -i localhost, tests/test_inventory_assembly.yml || FAILED=1
 
 echo
+echo "== service health evaluation logic (fixture-driven) ============"
+# Runs bare -- no ansible.cfg, no collections. The report masking half of
+# this playbook needs a staged config and runs under test_masking.sh above.
+ansible-playbook -i localhost, tests/test_service_health_logic.yml || FAILED=1
+
+echo
 if [ ${FAILED} -ne 0 ]; then
     echo "TEST SUITE FAILED"
     exit 1

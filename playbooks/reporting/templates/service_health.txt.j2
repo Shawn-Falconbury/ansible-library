@@ -1,0 +1,123 @@
+{#-
+  service_health.txt.j2
+
+  Rendered TWICE from the same data by playbooks/reporting/service_health.yml:
+
+    report_mask: true    -> the distribution copy, host names masked
+    report_mask: false   -> the archive copy, mode 0600, full names
+
+  ONE TEMPLATE, NOT TWO. Separate masked and unmasked templates drift, and the
+  two drifts are not equally visible: a field added to the archive copy and
+  forgotten in the masked one is a MISSING FIELD, which somebody notices; a
+  field added to the masked one without its mask is a LEAK, which nobody does.
+  Branching inside one template means every name renders through the same code
+  path and the mask applies by construction.
+
+  INPUT: health_rows, a list of dicts. The template never touches hostvars, so
+  tests can drive it from fixtures with no hosts present.
+
+      name        str   host identifier
+      reachable   bool  false -> no checks at all, never zeroed counts
+      verdict     str   PASS | FAIL | SKIP
+      checks      list  of check / status / expected / actual / reason
+      reason      str   present only when reachable is false
+-#}
+{%- macro hostname(value) -%}
+{#- Names render through this macro or they do not render. mask_hostname
+    RAISES on input it cannot parse rather than passing it through, so an
+    unexpected value fails the render instead of landing unmasked in a report
+    labelled masked. -#}
+{%- if value is not defined or value in (none, '') -%}
+-
+{%- elif report_mask -%}
+{{ value | mask_hostname }}
+{%- else -%}
+{{ value }}
+{%- endif -%}
+{%- endmacro -%}
+================================================================================
+SERVICE AND CERTIFICATE HEALTH
+Generated {{ report_generated }} UTC
+{% if report_mask %}
+MASKED COPY. Host names are partially redacted for distribution. The
+unredacted copy is archived on the control node.
+{% else %}
+UNMASKED COPY. Contains full host names. Do not forward.
+{% endif %}
+================================================================================
+
+SUMMARY
+  Hosts in scope    {{ health_rows | length }}
+  Collected         {{ health_rows | selectattr('reachable') | list | length }}
+  Not collected     {{ health_rows | rejectattr('reachable') | list | length }}
+
+  Checks PASS       {{ health_verdict_counts.PASS }}
+  Checks FAIL       {{ health_verdict_counts.FAIL }}
+  Checks SKIP       {{ health_verdict_counts.SKIP }}
+
+{#- SKIP is printed on its own line with its meaning spelled out. A reader
+    scanning three numbers will otherwise read the third as a minor variant of
+    the first. It is not: an unevaluated check is not a healthy one, and the
+    run fails on it by default. See docs/gotchas.md entry 16. -#}
+  A SKIP is NOT a pass. It means the check could not be evaluated, and the
+  thing it was supposed to check has an unknown state.
+
+{% for row in health_rows | sort(attribute='name') %}
+--------------------------------------------------------------------------------
+{{ hostname(row.name) }}  [{{ row.verdict }}]
+{% if not row.reachable %}
+  NOT COLLECTED -- {{ row.reason | default('no session established') }}
+{#- No counts here on purpose. "0 failed" for a host nobody reached renders as
+    a measurement and reads as the healthiest machine in the fleet. See
+    docs/gotchas.md entry 3. -#}
+  No checks were run on this host. Its service and certificate state is
+  unknown, not healthy.
+{% else %}
+{% for check in row.checks %}
+  {{ '%-6s' | format(check.status) }} {{ check.check }}
+{%- if check.status != 'PASS' %}
+           expected: {{ check.expected | default('') }}
+           actual:   {{ check.actual | default('') }}
+{% if check.reason | default('') %}           reason:   {{ check.reason | trim }}
+{% endif %}
+{%- endif %}
+{% else %}
+  No checks were configured for this host.
+{% endfor %}
+{% endif %}
+{% endfor %}
+--------------------------------------------------------------------------------
+{#- The summary sections below are derived from health_rows, NOT from the flat
+    health_skipped_summary / health_failed_summary lists the playbook builds.
+
+    Those lists exist for the assert messages the playbook prints to the
+    operator's own terminal, where full names are fine. Rendering them HERE was
+    a leak: they are plain strings with the host name already baked in, so they
+    bypassed the hostname() macro entirely and every name appeared unmasked in
+    a file labelled masked -- while the per-host rows above masked correctly,
+    which is exactly what made it look right.
+
+    tests/test_health_report_masking.yml caught this. The fix is not to mask
+    the strings, it is to delete the second data path: everything that renders
+    a host name goes through health_rows and through the macro. -#}
+{% if health_verdict_counts.SKIP | int > 0 %}
+
+UNEVALUATED CHECKS
+{% for row in health_rows | sort(attribute='name') %}
+{% if not row.reachable %}
+  {{ hostname(row.name) }} :: host -- {{ row.reason | default('no session established') }}
+{% endif %}
+{% for check in row.checks | selectattr('status', 'eq', 'SKIP') %}
+  {{ hostname(row.name) }} :: {{ check.check }}
+{% endfor %}
+{% endfor %}
+{% endif %}
+{% if health_verdict_counts.FAIL | int > 0 %}
+
+FAILED CHECKS
+{% for row in health_rows | sort(attribute='name') %}
+{% for check in row.checks | selectattr('status', 'eq', 'FAIL') %}
+  {{ hostname(row.name) }} :: {{ check.check }}
+{% endfor %}
+{% endfor %}
+{% endif %}
