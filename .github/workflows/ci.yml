@@ -121,7 +121,21 @@ jobs:
         run: ansible-playbook -i localhost, tests/test_report_masking.yml
 
       - name: Install pinned collections
-        run: ansible-galaxy collection install -r requirements.yml
+        # Retried, because this step reaches out to galaxy.ansible.com and a
+        # transient fetch failure there is not a defect in this repository.
+        # Bounded at three attempts so a genuinely bad pin still fails the
+        # build rather than being papered over -- a wrong version fails all
+        # three, a blip does not.
+        run: |
+          for attempt in 1 2 3; do
+            if ansible-galaxy collection install -r requirements.yml; then
+              exit 0
+            fi
+            echo "::warning::galaxy install attempt ${attempt} failed"
+            sleep $((attempt * 10))
+          done
+          echo "::error::galaxy install failed three times -- check requirements.yml pins"
+          exit 1
 
       - name: Syntax-check every playbook
         run: |
