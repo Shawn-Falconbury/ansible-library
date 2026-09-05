@@ -18,9 +18,9 @@
   proto/address:port into all three. A summary section rendered from
   pre-joined strings would bypass the macro entirely -- which is exactly the
   leak that showed up in service_health.txt.j2 and is why both the per-host
-  rows and the summary sections below iterate lx_rows.
+  rows and the summary sections below iterate host_rows.
 
-  INPUT: lx_rows, list of dicts. The template never touches hostvars, so
+  INPUT: host_rows, list of dicts. The template never touches hostvars, so
   tests can drive it from fixtures with no hosts present.
 
       name       str   host identifier
@@ -77,18 +77,18 @@ UNMASKED COPY. Contains full bind addresses. Do not forward.
 ================================================================================
 
 SUMMARY
-  Hosts in scope    {{ lx_rows | length }}
-  Swept             {{ lx_rows | selectattr('reachable') | list | length }}
-  Not swept         {{ lx_rows | rejectattr('reachable') | list | length }}
+  Hosts in scope    {{ host_rows | length }}
+  Swept             {{ host_rows | selectattr('reachable') | list | length }}
+  Not swept         {{ host_rows | rejectattr('reachable') | list | length }}
 
-  Checks PASS       {{ lx_counts.PASS }}
-  Checks FAIL       {{ lx_counts.FAIL }}
-  Checks SKIP       {{ lx_counts.SKIP }}
+  Checks PASS       {{ host_row_counts.PASS }}
+  Checks FAIL       {{ host_row_counts.FAIL }}
+  Checks SKIP       {{ host_row_counts.SKIP }}
 
   A SKIP is NOT a pass. It means the socket list could not be compared, and
   what is listening on that host is unknown rather than approved.
 
-{% for row in lx_rows | sort(attribute='name') %}
+{% for row in host_rows | sort(attribute='name') %}
 --------------------------------------------------------------------------------
 {{ hostname(row.name) }}  [{{ row.verdict }}]
 {% if not row.reachable %}
@@ -113,14 +113,14 @@ SUMMARY
 {% endif %}
 {% endfor %}
 --------------------------------------------------------------------------------
-{#- Both sections below derive from lx_rows, NOT from any pre-joined summary
+{#- Both sections below derive from host_rows, NOT from any pre-joined summary
     list. A flat list of "host :: finding" strings would have the name and
     address already baked in and would bypass both macros. That exact leak
     happened once in this repository; it is not repeated here. -#}
-{% if lx_counts.SKIP | int > 0 %}
+{% if host_row_counts.SKIP | int > 0 %}
 
 UNEVALUATED
-{% for row in lx_rows | sort(attribute='name') %}
+{% for row in host_rows | sort(attribute='name') %}
 {% if not row.reachable %}
   {{ hostname(row.name) }} :: host -- {{ row.reason | default('no session established') }}
 {% endif %}
@@ -129,10 +129,10 @@ UNEVALUATED
 {% endfor %}
 {% endfor %}
 {% endif %}
-{% if lx_counts.FAIL | int > 0 %}
+{% if host_row_counts.FAIL | int > 0 %}
 
 FAILED
-{% for row in lx_rows | sort(attribute='name') %}
+{% for row in host_rows | sort(attribute='name') %}
 {% for check in row.checks | selectattr('status', 'eq', 'FAIL') %}
   {{ hostname(row.name) }} :: {{ check.check.split(':', 1)[0] }} :: {{ addr(check.check.split(':', 1)[1] | default(check.check)) }}
 {% endfor %}

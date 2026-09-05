@@ -6,7 +6,7 @@
 # every check status against what the fixture specifies.
 #
 # ONE RUNNER FOR THREE EVALUATIONS. It works because all three files in
-# playbooks/linux/tasks/ emit the same contract -- lx_results and lx_verdict
+# playbooks/linux/tasks/ emit the same contract -- check_results and check_verdict
 # -- so the case only has to name which file to include. Adopting one status
 # vocabulary across the group is what buys this; three runners differing only
 # in a variable name would be three things to keep in step.
@@ -27,9 +27,9 @@
 - name: "{{ case.name }}: index results by check name"
   ansible.builtin.set_fact:
     _lx_effective: >-
-      {{ dict(lx_results | map(attribute='check')
-              | zip(lx_results | map(attribute='status')))
-         | combine({'verdict': lx_verdict}) }}
+      {{ dict(check_results | map(attribute='check')
+              | zip(check_results | map(attribute='status')))
+         | combine({'verdict': check_verdict}) }}
 
 - name: "{{ case.name }}: compare each expectation against the actual status"
   # A loop with a `when`, rather than a selectattr chain. selectattr cannot
@@ -59,7 +59,7 @@
   ansible.builtin.debug:
     msg: >-
       {{ '%-46s' | format(case.name) }}
-      {{ lx_results | map(attribute='check')
-         | zip(lx_results | map(attribute='status'))
+      {{ check_results | map(attribute='check')
+         | zip(check_results | map(attribute='status'))
          | map('join', '=') | join('  ') }}
-      => {{ lx_verdict }}
+      => {{ check_verdict }}

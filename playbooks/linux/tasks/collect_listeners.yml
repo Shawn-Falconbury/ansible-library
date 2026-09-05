@@ -45,8 +45,8 @@
 
 - name: Record a collection failure without inventing data
   ansible.builtin.set_fact:
-    lx_collection_failed: true
-    lx_collection_error: >-
+    collection_failed: true
+    collection_error: >-
       ss exited {{ _ls_ss.rc }}. {{ _ls_ss.stderr | default('') | trim }}
   when: _ls_ss.rc != 0
 

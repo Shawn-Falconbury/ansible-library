@@ -71,6 +71,17 @@ echo "== inventory row assembly (fixture-driven) ====================="
 ansible-playbook -i localhost, tests/test_inventory_assembly.yml || FAILED=1
 
 echo
+echo "== host row assembly (fixture-driven) =========================="
+# roles/host_rows, shared by playbooks/reporting/ and playbooks/linux/.
+# ANSIBLE_ROLES_PATH rather than a staged ansible.cfg: this is the only test
+# that needs role resolution, and one env var is cheaper than a wrapper.
+#
+# Note that --syntax-check does NOT catch an unresolvable role -- include_role
+# is dynamic, so the name is never looked up until the play runs. This test is
+# the only automated check that the role can be found at all.
+ANSIBLE_ROLES_PATH=./roles ansible-playbook -i localhost, tests/test_host_rows.yml || FAILED=1
+
+echo
 echo "== service health evaluation logic (fixture-driven) ============"
 # Runs bare -- no ansible.cfg, no collections. The report masking half of
 # this playbook needs a staged config and runs under test_masking.sh above.

@@ -56,7 +56,8 @@ playbooks/
   linux/         Linux hosts over SSH
   tls/           Certificate distribution
   reporting/     Health reporting and notification
-roles/           Reusable roles
+roles/           Reusable roles. host_rows builds the report row list,
+                 including the hosts that went unreachable.
 scripts/         Helper scripts, including the leak checker
 tests/           Test harness, fixtures, and negative cases
 ```

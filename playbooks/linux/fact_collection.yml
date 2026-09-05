@@ -171,10 +171,6 @@
     facts_fail_on_stale: "{{ facts_fail_on_stale | default(true) }}"
     _fc_manifest: "{{ facts_archive_dir }}/manifest.json"
 
-    # Resolved with ignore_restrictions, so hosts that went unreachable in
-    # the first play are still here. They are the entire reason the manifest
-    # exists.
-    _lx_hosts_all: "{{ ansible_play_hosts_all }}"
 
   tasks:
     - name: Guard against an empty play
@@ -182,19 +178,26 @@
       delegate_to: localhost
       ansible.builtin.assert:
         that:
-          - _lx_hosts_all | length > 0
+          - ansible_play_hosts_all | length > 0
         fail_msg: >-
           The play matched zero hosts. An empty archive run writes an empty
           manifest, which reads as a fleet with nothing in it.
           See docs/gotchas.md entry 8.
-        success_msg: "{{ _lx_hosts_all | length }} host(s) in scope."
+        success_msg: "{{ ansible_play_hosts_all | length }} host(s) in scope."
 
     - name: Build the manifest rows
-      ansible.builtin.include_tasks:
-        file: tasks/build_host_rows.yml
+      # include_role, not include_tasks against a ../ path. The role is
+      # shared between playbooks/reporting/ and playbooks/linux/, and a task
+      # file reached by relative path breaks the moment a directory moves.
+      # Resolution requires roles_path from ansible.cfg -- same shape as
+      # docs/gotchas.md entry 18.
+      ansible.builtin.include_role:
+        name: host_rows
         apply:
           run_once: true
           delegate_to: localhost
+      vars:
+        host_rows_targeted: "{{ ansible_play_hosts_all }}"
       run_once: true
 
     - name: Write the manifest
@@ -210,21 +213,21 @@
       vars:
         _fc_body:
           generated: "{{ '%Y-%m-%dT%H:%M:%SZ' | strftime }}"
-          hosts_in_scope: "{{ lx_rows | length }}"
-          counts: "{{ lx_counts }}"
-          hosts: "{{ lx_rows }}"
+          hosts_in_scope: "{{ host_rows | length }}"
+          counts: "{{ host_row_counts }}"
+          hosts: "{{ host_rows }}"
 
     - name: Summarise to stdout
       run_once: true
       delegate_to: localhost
       ansible.builtin.debug:
         msg:
-          - "Hosts in scope:  {{ lx_rows | length }}"
-          - "Archived now:    {{ lx_rows | selectattr('reachable') | list | length }}"
-          - "Not collected:   {{ lx_rows | rejectattr('reachable') | list | length }}"
-          - "Checks PASS:     {{ lx_counts.PASS }}"
-          - "Checks FAIL:     {{ lx_counts.FAIL }}  (includes stale archives)"
-          - "Checks SKIP:     {{ lx_counts.SKIP }}"
+          - "Hosts in scope:  {{ host_rows | length }}"
+          - "Archived now:    {{ host_rows | selectattr('reachable') | list | length }}"
+          - "Not collected:   {{ host_rows | rejectattr('reachable') | list | length }}"
+          - "Checks PASS:     {{ host_row_counts.PASS }}"
+          - "Checks FAIL:     {{ host_row_counts.FAIL }}  (includes stale archives)"
+          - "Checks SKIP:     {{ host_row_counts.SKIP }}"
           - "Manifest:        {{ _fc_manifest }}"
 
     - name: Fail on stale or unevaluated archives
@@ -235,10 +238,10 @@
       # triage, and here the artefact is the thing that says what went wrong.
       ansible.builtin.assert:
         that:
-          - lx_counts.FAIL | int == 0
-          - lx_counts.SKIP | int == 0
+          - host_row_counts.FAIL | int == 0
+          - host_row_counts.SKIP | int == 0
         fail_msg: >-
-          {{ lx_counts.FAIL }} stale or failed and {{ lx_counts.SKIP }}
+          {{ host_row_counts.FAIL }} stale or failed and {{ host_row_counts.SKIP }}
           unevaluated. Files for those hosts are still on disk and will read
           as current to anything that does not check {{ _fc_manifest }}.
         success_msg: "Every archive in scope was rewritten this run."

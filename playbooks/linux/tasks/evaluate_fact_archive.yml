@@ -3,7 +3,7 @@
 # tasks/evaluate_fact_archive.yml
 #
 # Decide whether this host's archived facts are current, stale, or absent.
-# Produces lx_results and lx_verdict.
+# Produces check_results and check_verdict.
 #
 # No host access. Every input arrives in lx_facts.
 #
@@ -40,18 +40,18 @@
 # See docs/gotchas.md entry 6.
 #
 # ---------------------------------------------------------------------------
-# OUTPUT: lx_results / lx_verdict
+# OUTPUT: check_results / check_verdict
 # ---------------------------------------------------------------------------
 # Checks: collection, archive_freshness
 # ===========================================================================
 
 - name: Reset per-host evaluation state
   ansible.builtin.set_fact:
-    lx_results: []
+    check_results: []
 
 - name: Evaluate whether facts were gathered
   ansible.builtin.set_fact:
-    lx_results: "{{ lx_results + [_fa_row] }}"
+    check_results: "{{ check_results + [_fa_row] }}"
   vars:
     _fa_row: >-
       {{
@@ -74,7 +74,7 @@
 
 - name: Evaluate archive freshness
   ansible.builtin.set_fact:
-    lx_results: "{{ lx_results + [_fa_row] }}"
+    check_results: "{{ check_results + [_fa_row] }}"
   vars:
     _fa_mtime: "{{ lx_facts.archive_mtime_epoch | default('') | string }}"
     _fa_now: "{{ lx_facts.now_epoch | default('') | string }}"
@@ -136,7 +136,7 @@
 
 - name: Summarise host verdict
   ansible.builtin.set_fact:
-    lx_verdict: >-
-      {{ 'FAIL' if lx_results | selectattr('status', 'eq', 'FAIL') | list | length > 0
-         else ('SKIP' if lx_results | selectattr('status', 'eq', 'SKIP') | list | length > 0
+    check_verdict: >-
+      {{ 'FAIL' if check_results | selectattr('status', 'eq', 'FAIL') | list | length > 0
+         else ('SKIP' if check_results | selectattr('status', 'eq', 'SKIP') | list | length > 0
                else 'PASS') }}

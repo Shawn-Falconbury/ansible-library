@@ -13,7 +13,7 @@
   Branching inside one template means every name renders through the same code
   path and the mask applies by construction.
 
-  INPUT: health_rows, a list of dicts. The template never touches hostvars, so
+  INPUT: host_rows, a list of dicts. The template never touches hostvars, so
   tests can drive it from fixtures with no hosts present.
 
       name        str   host identifier
@@ -47,13 +47,13 @@ UNMASKED COPY. Contains full host names. Do not forward.
 ================================================================================
 
 SUMMARY
-  Hosts in scope    {{ health_rows | length }}
-  Collected         {{ health_rows | selectattr('reachable') | list | length }}
-  Not collected     {{ health_rows | rejectattr('reachable') | list | length }}
+  Hosts in scope    {{ host_rows | length }}
+  Collected         {{ host_rows | selectattr('reachable') | list | length }}
+  Not collected     {{ host_rows | rejectattr('reachable') | list | length }}
 
-  Checks PASS       {{ health_verdict_counts.PASS }}
-  Checks FAIL       {{ health_verdict_counts.FAIL }}
-  Checks SKIP       {{ health_verdict_counts.SKIP }}
+  Checks PASS       {{ host_row_counts.PASS }}
+  Checks FAIL       {{ host_row_counts.FAIL }}
+  Checks SKIP       {{ host_row_counts.SKIP }}
 
 {#- SKIP is printed on its own line with its meaning spelled out. A reader
     scanning three numbers will otherwise read the third as a minor variant of
@@ -62,7 +62,7 @@ SUMMARY
   A SKIP is NOT a pass. It means the check could not be evaluated, and the
   thing it was supposed to check has an unknown state.
 
-{% for row in health_rows | sort(attribute='name') %}
+{% for row in host_rows | sort(attribute='name') %}
 --------------------------------------------------------------------------------
 {{ hostname(row.name) }}  [{{ row.verdict }}]
 {% if not row.reachable %}
@@ -87,8 +87,8 @@ SUMMARY
 {% endif %}
 {% endfor %}
 --------------------------------------------------------------------------------
-{#- The summary sections below are derived from health_rows, NOT from the flat
-    health_skipped_summary / health_failed_summary lists the playbook builds.
+{#- The summary sections below are derived from host_rows, NOT from the flat
+    host_rows_skipped / host_rows_failed lists the playbook builds.
 
     Those lists exist for the assert messages the playbook prints to the
     operator's own terminal, where full names are fine. Rendering them HERE was
@@ -99,11 +99,11 @@ SUMMARY
 
     tests/test_health_report_masking.yml caught this. The fix is not to mask
     the strings, it is to delete the second data path: everything that renders
-    a host name goes through health_rows and through the macro. -#}
-{% if health_verdict_counts.SKIP | int > 0 %}
+    a host name goes through host_rows and through the macro. -#}
+{% if host_row_counts.SKIP | int > 0 %}
 
 UNEVALUATED CHECKS
-{% for row in health_rows | sort(attribute='name') %}
+{% for row in host_rows | sort(attribute='name') %}
 {% if not row.reachable %}
   {{ hostname(row.name) }} :: host -- {{ row.reason | default('no session established') }}
 {% endif %}
@@ -112,10 +112,10 @@ UNEVALUATED CHECKS
 {% endfor %}
 {% endfor %}
 {% endif %}
-{% if health_verdict_counts.FAIL | int > 0 %}
+{% if host_row_counts.FAIL | int > 0 %}
 
 FAILED CHECKS
-{% for row in health_rows | sort(attribute='name') %}
+{% for row in host_rows | sort(attribute='name') %}
 {% for check in row.checks | selectattr('status', 'eq', 'FAIL') %}
   {{ hostname(row.name) }} :: {{ check.check }}
 {% endfor %}

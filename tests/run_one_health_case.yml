@@ -23,9 +23,9 @@
   # can assert on both through one uniform lookup.
   ansible.builtin.set_fact:
     _sh_effective: >-
-      {{ dict(sh_results | map(attribute='check')
-              | zip(sh_results | map(attribute='status')))
-         | combine({'verdict': sh_verdict}) }}
+      {{ dict(check_results | map(attribute='check')
+              | zip(check_results | map(attribute='status')))
+         | combine({'verdict': check_verdict}) }}
 
 - name: "{{ case.name }}: compare each expectation against the actual status"
   # A loop with a `when`, rather than a selectattr chain. selectattr cannot
@@ -55,7 +55,7 @@
   ansible.builtin.debug:
     msg: >-
       {{ '%-40s' | format(case.name) }}
-      {{ sh_results | map(attribute='check')
-         | zip(sh_results | map(attribute='status'))
+      {{ check_results | map(attribute='check')
+         | zip(check_results | map(attribute='status'))
          | map('join', '=') | join('  ') }}
-      => {{ sh_verdict }}
+      => {{ check_verdict }}

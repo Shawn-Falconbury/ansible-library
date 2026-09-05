@@ -1,0 +1,17 @@
+---
+galaxy_info:
+  role_name: host_rows
+  author: ansible-library
+  description: >-
+    Build the report row list from per-host check results, including the hosts
+    that went unreachable and are therefore absent from ansible_play_hosts.
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: EL
+      versions: [all]
+    - name: Debian
+      versions: [all]
+  galaxy_tags: [reporting]
+
+dependencies: []

@@ -60,7 +60,7 @@
     # -----------------------------------------------------------------------
     - name: Build fixture rows for the report template
       ansible.builtin.set_fact:
-        health_rows:
+        host_rows:
           - name: web-01.site.example
             reachable: true
             verdict: FAIL
@@ -81,7 +81,7 @@
             verdict: SKIP
             checks: []
             reason: no session established, nothing collected
-        health_verdict_counts:
+        host_row_counts:
           PASS: 0
           FAIL: 1
           SKIP: 2

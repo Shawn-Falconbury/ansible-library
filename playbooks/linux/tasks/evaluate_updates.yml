@@ -3,7 +3,7 @@
 # tasks/evaluate_updates.yml
 #
 # Decide whether an update run actually updated anything.
-# Produces lx_results and lx_verdict.
+# Produces check_results and check_verdict.
 #
 # No host access. Every input arrives in lx_facts.
 #
@@ -45,18 +45,18 @@
 # in destroys the evidence. See docs/gotchas.md entry 6.
 #
 # ---------------------------------------------------------------------------
-# OUTPUT: lx_results / lx_verdict
+# OUTPUT: check_results / check_verdict
 # ---------------------------------------------------------------------------
 # Checks: disk_preflight, updates_applied, held_packages, reboot_required
 # ===========================================================================
 
 - name: Reset per-host evaluation state
   ansible.builtin.set_fact:
-    lx_results: []
+    check_results: []
 
 - name: Evaluate the disk pre-flight gate
   ansible.builtin.set_fact:
-    lx_results: "{{ lx_results + [_up_row] }}"
+    check_results: "{{ check_results + [_up_row] }}"
   vars:
     _up_free: "{{ lx_facts.disk_free_mb | default('') | string }}"
 
@@ -97,7 +97,7 @@
   # inputs, and reporting them as PASS because nothing failed is exactly the
   # error in docs/gotchas.md entry 16.
   ansible.builtin.set_fact:
-    lx_results: "{{ lx_results + [_up_row] }}"
+    check_results: "{{ check_results + [_up_row] }}"
   vars:
     _up_row:
       check: updates_applied
@@ -111,7 +111,7 @@
 
 - name: Evaluate whether the upgrade actually applied
   ansible.builtin.set_fact:
-    lx_results: "{{ lx_results + [_up_row] }}"
+    check_results: "{{ check_results + [_up_row] }}"
   vars:
     _up_after: "{{ lx_facts.upgradable_after | default([]) }}"
     _up_before: "{{ lx_facts.upgradable_before | default([]) }}"
@@ -143,7 +143,7 @@
   # is non-empty, and they are deliberate often enough that they need their
   # own line rather than being folded into the count above.
   ansible.builtin.set_fact:
-    lx_results: "{{ lx_results + [_up_row] }}"
+    check_results: "{{ check_results + [_up_row] }}"
   vars:
     _up_held: "{{ lx_facts.held | default([]) }}"
     _up_row: >-
@@ -170,7 +170,7 @@
 
 - name: Evaluate whether a reboot is outstanding
   ansible.builtin.set_fact:
-    lx_results: "{{ lx_results + [_up_row] }}"
+    check_results: "{{ check_results + [_up_row] }}"
   vars:
     _up_row: >-
       {{
@@ -196,7 +196,7 @@
 
 - name: Summarise host verdict
   ansible.builtin.set_fact:
-    lx_verdict: >-
-      {{ 'FAIL' if lx_results | selectattr('status', 'eq', 'FAIL') | list | length > 0
-         else ('SKIP' if lx_results | selectattr('status', 'eq', 'SKIP') | list | length > 0
+    check_verdict: >-
+      {{ 'FAIL' if check_results | selectattr('status', 'eq', 'FAIL') | list | length > 0
+         else ('SKIP' if check_results | selectattr('status', 'eq', 'SKIP') | list | length > 0
                else 'PASS') }}

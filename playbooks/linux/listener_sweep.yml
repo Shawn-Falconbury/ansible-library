@@ -93,7 +93,7 @@
 
     - name: Evaluate against the baseline
       ansible.builtin.include_tasks: tasks/evaluate_listeners.yml
-      when: not (lx_collection_failed | default(false))
+      when: not (collection_failed | default(false))
 
 - name: Report on listening sockets
   hosts: linux_hosts
@@ -114,10 +114,6 @@
     _ls_masked_path: "{{ listener_report_dir }}/{{ listener_report_name }}.txt"
     _ls_full_path: "{{ listener_report_dir }}/{{ listener_report_name }}-full.txt"
 
-    # Resolved with ignore_restrictions, so it still holds hosts that went
-    # unreachable during collection. That is the only reason a dead host can
-    # appear in this report at all.
-    _lx_hosts_all: "{{ ansible_play_hosts_all }}"
 
   tasks:
     - name: Guard against an empty play
@@ -125,21 +121,28 @@
       delegate_to: localhost
       ansible.builtin.assert:
         that:
-          - _lx_hosts_all | length > 0
+          - ansible_play_hosts_all | length > 0
         fail_msg: >-
           The play matched zero hosts. Check that the inventory group
           'linux_hosts' exists and is populated. An empty run is not a
           passing run. See docs/gotchas.md entry 8.
-        success_msg: "{{ _lx_hosts_all | length }} host(s) in scope."
+        success_msg: "{{ ansible_play_hosts_all | length }} host(s) in scope."
 
     - name: Build the report rows
       # apply:, not bare run_once/delegate_to -- those are not valid
       # attributes of a TaskInclude and are rejected at syntax-check.
-      ansible.builtin.include_tasks:
-        file: tasks/build_host_rows.yml
+      # include_role, not include_tasks against a ../ path. The role is
+      # shared between playbooks/reporting/ and playbooks/linux/, and a task
+      # file reached by relative path breaks the moment a directory moves.
+      # Resolution requires roles_path from ansible.cfg -- same shape as
+      # docs/gotchas.md entry 18.
+      ansible.builtin.include_role:
+        name: host_rows
         apply:
           run_once: true
           delegate_to: localhost
+      vars:
+        host_rows_targeted: "{{ ansible_play_hosts_all }}"
       run_once: true
 
     - name: Ensure the report directory exists
@@ -209,12 +212,12 @@
       delegate_to: localhost
       ansible.builtin.debug:
         msg:
-          - "Hosts in scope:  {{ lx_rows | length }}"
-          - "Swept:           {{ lx_rows | selectattr('reachable') | list | length }}"
-          - "Not swept:       {{ lx_rows | rejectattr('reachable') | list | length }}"
-          - "Checks PASS:     {{ lx_counts.PASS }}"
-          - "Checks FAIL:     {{ lx_counts.FAIL }}"
-          - "Checks SKIP:     {{ lx_counts.SKIP }}  (unevaluated, not clean)"
+          - "Hosts in scope:  {{ host_rows | length }}"
+          - "Swept:           {{ host_rows | selectattr('reachable') | list | length }}"
+          - "Not swept:       {{ host_rows | rejectattr('reachable') | list | length }}"
+          - "Checks PASS:     {{ host_row_counts.PASS }}"
+          - "Checks FAIL:     {{ host_row_counts.FAIL }}"
+          - "Checks SKIP:     {{ host_row_counts.SKIP }}  (unevaluated, not clean)"
           - "Distribution:    {{ _ls_masked_path }} (0640, masked)"
           - "Archive:         {{ _ls_full_path }} (0600, full)"
 
@@ -225,9 +228,9 @@
       # artefact is much harder to triage.
       ansible.builtin.assert:
         that:
-          - lx_counts.SKIP | int == 0
+          - host_row_counts.SKIP | int == 0
         fail_msg: >-
-          {{ lx_counts.SKIP }} check(s) could not be evaluated and were NOT
+          {{ host_row_counts.SKIP }} check(s) could not be evaluated and were NOT
           counted as clean. See the UNEVALUATED section of
           {{ _ls_full_path }}.
         success_msg: "Every check produced a verdict."
@@ -238,9 +241,9 @@
       delegate_to: localhost
       ansible.builtin.assert:
         that:
-          - lx_counts.FAIL | int == 0
+          - host_row_counts.FAIL | int == 0
         fail_msg: >-
-          {{ lx_counts.FAIL }} check(s) failed. See the FAILED section of
+          {{ host_row_counts.FAIL }} check(s) failed. See the FAILED section of
           {{ _ls_full_path }}.
         success_msg: "Every evaluated check passed."
       when: listener_fail_on_fail | bool

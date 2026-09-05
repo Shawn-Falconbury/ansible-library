@@ -53,8 +53,8 @@
   # defaults, or every check evaluates against those blanks and renders as a
   # measured absence rather than an absent measurement.
   ansible.builtin.set_fact:
-    sh_collection_failed: true
-    sh_collection_error: "{{ _sh_svc.msg | default('service_facts failed', true) }}"
+    collection_failed: true
+    collection_error: "{{ _sh_svc.msg | default('service_facts failed', true) }}"
   when: >-
     _sh_svc.failed | default(false) or _sh_svc.unreachable | default(false)
 

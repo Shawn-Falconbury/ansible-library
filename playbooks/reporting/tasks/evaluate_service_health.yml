@@ -2,7 +2,7 @@
 # ===========================================================================
 # tasks/evaluate_service_health.yml
 #
-# Evaluate collected health data. Produces sh_results and sh_verdict.
+# Evaluate collected health data. Produces check_results and check_verdict.
 #
 # ---------------------------------------------------------------------------
 # WHY THIS IS A SEPARATE FILE
@@ -34,7 +34,7 @@
 # See docs/gotchas.md entry 6.
 #
 # ---------------------------------------------------------------------------
-# OUTPUT: sh_results
+# OUTPUT: check_results
 # ---------------------------------------------------------------------------
 # A list of dicts, one per check:
 #   check     str  service:<unit> | cert:<path> | services | certificates
@@ -52,7 +52,7 @@
   # that produces no value inherits the previous host's results, and the
   # report shows a plausible verdict computed from someone else's data.
   ansible.builtin.set_fact:
-    sh_results: []
+    check_results: []
 
 # ---------------------------------------------------------------------------
 # Services
@@ -64,7 +64,7 @@
   # empty check set is not a passing check set. A misspelled variable name
   # lands here rather than silently reporting a clean host.
   ansible.builtin.set_fact:
-    sh_results: "{{ sh_results + [_sh_row] }}"
+    check_results: "{{ check_results + [_sh_row] }}"
   vars:
     _sh_row:
       check: services
@@ -78,7 +78,7 @@
 
 - name: Evaluate each expected service
   ansible.builtin.set_fact:
-    sh_results: "{{ sh_results + [_sh_row] }}"
+    check_results: "{{ check_results + [_sh_row] }}"
   loop: "{{ sh_facts.services_expected | default([]) }}"
   loop_control:
     loop_var: _sh_unit
@@ -120,7 +120,7 @@
 
 - name: Record that no certificates were configured to check
   ansible.builtin.set_fact:
-    sh_results: "{{ sh_results + [_sh_row] }}"
+    check_results: "{{ check_results + [_sh_row] }}"
   vars:
     _sh_row:
       check: certificates
@@ -134,7 +134,7 @@
 
 - name: Evaluate each certificate's expiry
   ansible.builtin.set_fact:
-    sh_results: "{{ sh_results + [_sh_row] }}"
+    check_results: "{{ check_results + [_sh_row] }}"
   loop: "{{ sh_facts.certificates | default([]) }}"
   loop_control:
     loop_var: _sh_cert
@@ -194,9 +194,9 @@
 
 - name: Summarise host verdict
   ansible.builtin.set_fact:
-    sh_verdict: >-
-      {{ 'FAIL' if sh_results | selectattr('status', 'eq', 'FAIL') | list | length > 0
-         else ('SKIP' if sh_results | selectattr('status', 'eq', 'SKIP') | list | length > 0
+    check_verdict: >-
+      {{ 'FAIL' if check_results | selectattr('status', 'eq', 'FAIL') | list | length > 0
+         else ('SKIP' if check_results | selectattr('status', 'eq', 'SKIP') | list | length > 0
                else 'PASS') }}
     # A host with any SKIP is NOT healthy. It is unevaluated. Rolling SKIP up
     # into PASS is the error this repository exists to document -- if the

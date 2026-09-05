@@ -3,7 +3,7 @@
 # tasks/evaluate_listeners.yml
 #
 # Compare observed listening sockets against the expected set.
-# Produces lx_results and lx_verdict.
+# Produces check_results and check_verdict.
 #
 # No host access. Every input arrives in lx_facts, already gathered by
 # tasks/collect_listeners.yml. That split is what lets the comparison run
@@ -41,7 +41,7 @@
 # See docs/gotchas.md entry 8.
 #
 # ---------------------------------------------------------------------------
-# OUTPUT: lx_results / lx_verdict
+# OUTPUT: check_results / check_verdict
 # ---------------------------------------------------------------------------
 #   check   proto/address:port, prefixed by outcome class
 #   status  PASS | FAIL | SKIP
@@ -54,7 +54,7 @@
   # that produces no value inherits the previous host's results, and the
   # report shows a plausible verdict computed from someone else's data.
   ansible.builtin.set_fact:
-    lx_results: []
+    check_results: []
     _ls_obs_keys: []
     _ls_obs_pairs: []
     _ls_exp_keys: []
@@ -62,7 +62,7 @@
 
 - name: Record that the socket list could not be read
   ansible.builtin.set_fact:
-    lx_results:
+    check_results:
       - check: listeners
         status: SKIP
         expected: a readable socket list
@@ -78,7 +78,7 @@
   # every host in the fleet: nothing to compare against, zero findings, a
   # clean report. See docs/gotchas.md entry 8.
   ansible.builtin.set_fact:
-    lx_results:
+    check_results:
       - check: listener_baseline
         status: SKIP
         expected: at least one entry
@@ -126,7 +126,7 @@
 
 - name: Evaluate each expected socket
   ansible.builtin.set_fact:
-    lx_results: "{{ lx_results + [_ls_row] }}"
+    check_results: "{{ check_results + [_ls_row] }}"
   loop: "{{ lx_facts.expected | default([]) }}"
   loop_control:
     loop_var: _ls_exp
@@ -181,7 +181,7 @@
   # reported above as an exposure change; reporting it here as well would
   # split one finding across two lines and bury the explanation.
   ansible.builtin.set_fact:
-    lx_results: "{{ lx_results + [_ls_row] }}"
+    check_results: "{{ check_results + [_ls_row] }}"
   loop: "{{ lx_facts.listeners | default([]) }}"
   loop_control:
     loop_var: _ls_sock
@@ -204,9 +204,9 @@
 
 - name: Summarise host verdict
   ansible.builtin.set_fact:
-    lx_verdict: >-
-      {{ 'FAIL' if lx_results | selectattr('status', 'eq', 'FAIL') | list | length > 0
-         else ('SKIP' if lx_results | selectattr('status', 'eq', 'SKIP') | list | length > 0
+    check_verdict: >-
+      {{ 'FAIL' if check_results | selectattr('status', 'eq', 'FAIL') | list | length > 0
+         else ('SKIP' if check_results | selectattr('status', 'eq', 'SKIP') | list | length > 0
                else 'PASS') }}
     # A host with any SKIP is not clean, it is unevaluated. Rolling SKIP up
     # into PASS is the mistake in docs/gotchas.md entry 16.

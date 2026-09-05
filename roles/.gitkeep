@@ -1,6 +1,0 @@
-# Git does not track empty directories, so this placeholder keeps roles/
-# present in a fresh clone. The top-level README lists roles/ in the layout;
-# without this file that line would describe a directory that does not exist
-# for anyone who clones the repo.
-#
-# Delete this once the first role lands here.

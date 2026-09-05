@@ -115,6 +115,13 @@ jobs:
       - name: Inventory row assembly test
         run: ansible-playbook -i localhost, tests/test_inventory_assembly.yml
 
+      - name: Host row assembly test
+        # --syntax-check cannot verify that this role resolves; include_role
+        # is dynamic. This step is the only thing that does.
+        run: |
+          ANSIBLE_ROLES_PATH=./roles \
+            ansible-playbook -i localhost, tests/test_host_rows.yml
+
       - name: Service health logic test
         run: ansible-playbook -i localhost, tests/test_service_health_logic.yml
 

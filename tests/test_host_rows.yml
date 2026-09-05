@@ -1,0 +1,186 @@
+---
+# ===========================================================================
+# test_host_rows.yml
+#
+# Drive roles/host_rows against fixture hosts and assert that a host which
+# produced no results still produces a row.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS
+# ---------------------------------------------------------------------------
+# The two task files this role replaced had no direct test between them. They
+# were covered only in the sense that the playbooks calling them were
+# eventually run against real hosts, which is not coverage -- reproducing the
+# case that matters needs a host that is down on demand.
+#
+# This is the same shape as tests/test_inventory_assembly.yml, which does test
+# the network row builder. The role now gets the same treatment.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS ONE NEEDS ANSIBLE_ROLES_PATH
+# ---------------------------------------------------------------------------
+# include_role resolves by name through roles_path, which ansible.cfg declares
+# and which is gitignored. Rather than stage a config, run_tests.sh sets
+# ANSIBLE_ROLES_PATH for this one invocation.
+#
+# Note that `ansible-playbook --syntax-check` does NOT catch an unresolvable
+# role: include_role is a dynamic include, so the name is never looked up
+# until the play runs. A playbook whose role cannot be found passes
+# syntax-check cleanly. See docs/conventions.md.
+#
+# ---------------------------------------------------------------------------
+# RUNNING
+# ---------------------------------------------------------------------------
+#   ANSIBLE_ROLES_PATH=./roles ansible-playbook -i localhost, tests/test_host_rows.yml
+# ===========================================================================
+
+- name: Host row assembly
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    # Three hosts, one with results. That is the shape left behind when two
+    # hosts go unreachable during collection: gone from ansible_play_hosts,
+    # still present in ansible_play_hosts_all.
+    _hr_targeted:
+      - collected-01.site.example
+      - vanished-01.site.example
+      - failed-collection-01.site.example
+      - stale-results-01.site.example
+
+    _hr_fixture_results:
+      - check: service:nginx.service
+        status: PASS
+        expected: running
+        actual: running
+        reason: ""
+      - check: cert:/etc/ssl/certs/service.pem
+        status: SKIP
+        expected: more than 30 days remaining
+        actual: unreadable
+        reason: expiry did not parse
+
+  tasks:
+    - name: Register the fixture hosts
+      ansible.builtin.add_host:
+        name: "{{ item.name }}"
+        groups: _hr_fixture
+        check_results: "{{ item.check_results | default(omit) }}"
+        check_verdict: "{{ item.check_verdict | default(omit) }}"
+        collection_failed: "{{ item.collection_failed | default(omit) }}"
+        collection_error: "{{ item.collection_error | default(omit) }}"
+      loop:
+        # Answered and evaluated.
+        - name: collected-01.site.example
+          check_results: "{{ _hr_fixture_results }}"
+          check_verdict: SKIP
+
+        # Went unreachable. No check_results at all -- the state Ansible
+        # leaves a host in, not something a collector sets.
+        - name: vanished-01.site.example
+
+        # Answered, but collection failed. Different condition, same row:
+        # nothing was measured either way.
+        - name: failed-collection-01.site.example
+          collection_failed: true
+          collection_error: ss exited 127
+
+        # Results present AND collection_failed set. The playbooks guard the
+        # evaluation include with `when: not collection_failed`, so this
+        # should not arise -- but the role must not depend on every caller
+        # remembering that guard. Without this case the collection_failed
+        # clause in the role is untested: dropping it entirely still passes,
+        # because the host above has no check_results either way.
+        - name: stale-results-01.site.example
+          check_results: "{{ _hr_fixture_results }}"
+          check_verdict: SKIP
+          collection_failed: true
+          collection_error: evaluated, then the transport dropped
+      changed_when: false
+
+    - name: Build the rows
+      ansible.builtin.include_role:
+        name: host_rows
+      vars:
+        host_rows_targeted: "{{ _hr_targeted }}"
+
+    - name: Every targeted host produced a row
+      # The central assertion. If the role ever iterates ansible_play_hosts
+      # instead of its input list, this drops to 1 and fails here rather than
+      # in a report somebody trusts.
+      ansible.builtin.assert:
+        that:
+          - host_rows | length == 4
+          - (host_rows | map(attribute='name') | list | sort) == (_hr_targeted | sort)
+        fail_msg: >-
+          Expected one row per targeted host. Got {{ host_rows | length }}:
+          {{ host_rows | map(attribute='name') | join(', ') }}
+        success_msg: "4 rows for 4 targeted hosts."
+
+    - name: The collected host kept its checks and verdict
+      ansible.builtin.assert:
+        that:
+          - _hr_row.reachable
+          - _hr_row.verdict == 'SKIP'
+          - _hr_row.checks | length == 2
+        fail_msg: "Collected host lost or altered its results: {{ _hr_row }}"
+        success_msg: "Collected host round-tripped intact."
+      vars:
+        _hr_row: >-
+          {{ host_rows | selectattr('name', 'eq', 'collected-01.site.example') | first }}
+
+    - name: Hosts with no results are marked unreachable and carry absence
+      # docs/gotchas.md entries 3 and 16, asserted directly. An empty check
+      # list is an absence; a zeroed count would render as a measurement.
+      ansible.builtin.assert:
+        that:
+          - not _hr_row.reachable
+          - _hr_row.verdict == 'SKIP'
+          - _hr_row.checks == []
+          - _hr_row.reason | length > 0
+        fail_msg: "An uncollected host was not flagged correctly: {{ _hr_row }}"
+        success_msg: "Uncollected rows carry an empty check list and a reason."
+      loop:
+        - vanished-01.site.example
+        - failed-collection-01.site.example
+        - stale-results-01.site.example
+      loop_control:
+        loop_var: _hr_name
+        label: "{{ _hr_name }}"
+      vars:
+        _hr_row: "{{ host_rows | selectattr('name', 'eq', _hr_name) | first }}"
+
+    - name: Uncollected hosts contribute a SKIP to the totals
+      # Counting only the checks that exist would let a host nobody reached
+      # vanish from the totals entirely -- entry 2, one level up from the
+      # row list. One SKIP from the fixture check, two from the dead hosts.
+      ansible.builtin.assert:
+        that:
+          - host_row_counts.PASS | int == 1
+          - host_row_counts.FAIL | int == 0
+          # One SKIP from the collected host's own checks, plus one per
+          # uncollected host. A host nobody reached must not vanish from the
+          # totals.
+          - host_row_counts.SKIP | int == 4
+        fail_msg: "Counts wrong: {{ host_row_counts }}"
+        success_msg: "Counts include the uncollected hosts: {{ host_row_counts }}"
+
+    - name: The failure detail names the cause
+      # "2 unevaluated" and "2 unevaluated, one refused the credential" lead
+      # to different next actions.
+      ansible.builtin.assert:
+        that:
+          - host_rows_skipped | length == 4
+          - host_rows_failed | length == 0
+          - host_rows_skipped | select('search', 'ss exited 127') | list | length == 1
+          - host_rows_skipped | select('search', 'transport dropped') | list | length == 1
+        fail_msg: "Detail missing or wrong: {{ host_rows_skipped }}"
+        success_msg: "Every SKIP is named, with its reason where there is one."
+
+    - name: Report suite outcome
+      ansible.builtin.debug:
+        msg:
+          - "rows:    {{ host_rows | length }}"
+          - "counts:  {{ host_row_counts }}"
+          - "skipped: {{ host_rows_skipped | length }}"

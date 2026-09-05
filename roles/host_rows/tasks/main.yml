@@ -1,0 +1,207 @@
+---
+# ===========================================================================
+# roles/host_rows
+#
+# Turn per-host check results into the row list every report template in this
+# repository consumes, plus the counts and detail the playbooks assert on.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS IS A ROLE AND NOT A SHARED TASK FILE
+# ---------------------------------------------------------------------------
+# playbooks/reporting/ and playbooks/linux/ both need this, and a task file
+# shared between them would be reached as `../../reporting/tasks/...`. That is
+# the same relative-path fragility this repository already rejects for
+# templates: correct today, broken the moment a directory moves, and invisible
+# until it is.
+#
+# include_role resolves by NAME through roles_path, so it does not care where
+# the calling playbook lives.
+#
+# The cost is that roles_path must be declared in ansible.cfg, exactly like
+# filter_plugins. A bare checkout without a staged config cannot resolve this
+# role, and the error names the role rather than the search path -- the same
+# shape as docs/gotchas.md entry 18. ansible.cfg.example already declares it.
+#
+# ---------------------------------------------------------------------------
+# ONE CONTRACT, NOT A PARAMETERISED ONE
+# ---------------------------------------------------------------------------
+# This replaces two files that were identical apart from a variable prefix:
+# playbooks/reporting/tasks/build_health_rows.yml (sh_*) and
+# playbooks/linux/tasks/build_host_rows.yml (lx_*).
+#
+# The obvious merge is to parameterise over the prefix and look values up
+# through hostvars[h][results_var]. That trades duplication for indirection in
+# the one file where clarity matters most -- the file that decides whether a
+# host appears in a report at all.
+#
+# So the prefixes were removed instead. Every evaluation file in this
+# repository now emits check_results and check_verdict, and this role reads
+# those names directly. There is nothing to parameterise because there is
+# nothing left that differs.
+#
+# playbooks/network/tasks/build_inventory_rows.yml is deliberately NOT merged
+# in. It shares this skeleton but its rows carry device fields rather than
+# check results, so folding it in would reintroduce exactly the payload
+# indirection avoided above.
+#
+# ---------------------------------------------------------------------------
+# INPUT
+# ---------------------------------------------------------------------------
+#   host_rows_targeted   list of hostnames the play targeted, INCLUDING any
+#                        that went unreachable during collection. Pass
+#                        ansible_play_hosts_all.
+#
+#   Read from hostvars, set by the evaluation and collection task files:
+#     check_results      list of {check, status, expected, actual, reason}
+#     check_verdict      PASS | FAIL | SKIP
+#     collection_failed  set when a host answered but collection failed
+#     collection_error   why
+#
+# ---------------------------------------------------------------------------
+# OUTPUT
+# ---------------------------------------------------------------------------
+#   host_rows           one dict per host in host_rows_targeted
+#   host_row_counts     {PASS, FAIL, SKIP} across every check in the fleet
+#   host_rows_skipped   list of "host :: check" for every SKIP
+#   host_rows_failed    list of "host :: check" for every FAIL
+#
+# The two summary lists exist for assert messages on the operator's own
+# terminal, where full names are fine. They are NOT for templates: they are
+# flat strings with the host name already baked in, so rendering them would
+# bypass a masking macro entirely. That leak happened once already, in
+# service_health.txt.j2. Templates derive their summary sections from
+# host_rows.
+#
+# ---------------------------------------------------------------------------
+# THE RULE
+# ---------------------------------------------------------------------------
+# Iterate host_rows_targeted. Never ansible_play_hosts, never hostvars.
+#
+# Unreachable hosts are gone from ansible_play_hosts by the time this runs. A
+# list built from the survivors is internally consistent, correctly formatted,
+# and missing exactly the hosts somebody needed to know about -- and their
+# absence reads as a smaller fleet, not an outage. See docs/gotchas.md entry 2.
+#
+# A host that produced no results is NOT given zero counts. It gets
+# reachable: false, an empty check list, and it contributes a SKIP to the
+# totals, because an uncollected host is unevaluated rather than healthy.
+# See entries 3 and 16.
+# ===========================================================================
+
+- name: Require the targeted host list
+  # Undefined here means the caller forgot to pass ansible_play_hosts_all,
+  # which would produce an empty row list and a report describing a fleet
+  # with nothing in it.
+  ansible.builtin.assert:
+    that:
+      - host_rows_targeted is defined
+      - host_rows_targeted is iterable
+      - host_rows_targeted is not string
+    fail_msg: >-
+      host_rows_targeted must be set to the list of hosts the play targeted,
+      normally ansible_play_hosts_all. Without it this role cannot know which
+      hosts went missing.
+    success_msg: "{{ host_rows_targeted | length }} host(s) targeted."
+
+- name: Start from empty accumulators
+  # Explicit rather than `| default([])` inside the accumulators. Re-running
+  # this role in one process would otherwise append to the previous pass and
+  # silently double the report.
+  ansible.builtin.set_fact:
+    host_rows: []
+    host_rows_skipped: []
+    host_rows_failed: []
+
+- name: Build one row per targeted host
+  ansible.builtin.set_fact:
+    host_rows: "{{ host_rows + [_hr_row] }}"
+  loop: "{{ host_rows_targeted }}"
+  loop_control:
+    loop_var: _hr_host
+    label: "{{ _hr_host }}"
+  vars:
+    _hr_hv: "{{ hostvars[_hr_host] | default({}) }}"
+
+    # Decided once. Inlining this into the row expression would put the
+    # definition of "collected" in three places inside one Jinja expression,
+    # and they would stop agreeing.
+    _hr_ok: >-
+      {{ ('check_results' in _hr_hv)
+         and not (_hr_hv.collection_failed | default(false) | bool) }}
+
+    _hr_reason: >-
+      {{ _hr_hv.collection_error
+         | default('no session established, nothing collected', true) }}
+
+    # Written out in full rather than merged with combine(). A merge would
+    # make the uncollected row "the collected row minus some fields", so a
+    # field added later would appear in both by default -- the wrong default.
+    _hr_row: >-
+      {{
+        {
+          'name': _hr_host,
+          'reachable': true,
+          'verdict': _hr_hv.check_verdict | default('SKIP'),
+          'checks': _hr_hv.check_results | default([])
+        }
+        if _hr_ok | bool else
+        {
+          'name': _hr_host,
+          'reachable': false,
+          'verdict': 'SKIP',
+          'checks': [],
+          'reason': _hr_reason
+        }
+      }}
+
+- name: Confirm every targeted host produced exactly one row
+  # The task above is a loop with a conditional inside it, which is the shape
+  # that silently drops an element. A short row list is otherwise
+  # indistinguishable from a small fleet.
+  ansible.builtin.assert:
+    that:
+      - host_rows | length == host_rows_targeted | length
+      - (host_rows | map(attribute='name') | list | sort) == (host_rows_targeted | list | sort)
+    fail_msg: >-
+      Row assembly dropped hosts. Targeted {{ host_rows_targeted | length }},
+      produced {{ host_rows | length }}. Missing:
+      {{ host_rows_targeted | difference(host_rows | map(attribute='name') | list) | join(', ') }}
+    success_msg: >-
+      {{ host_rows | length }} row(s) for {{ host_rows_targeted | length }}
+      targeted host(s).
+
+- name: Collect the SKIP and FAIL detail
+  # Counts alone are not actionable. "3 unevaluated" and "3 unevaluated, all
+  # of them the same certificate path" lead to different next steps.
+  ansible.builtin.set_fact:
+    host_rows_skipped: >-
+      {{ host_rows_skipped
+         + (_hr_row.checks | selectattr('status', 'eq', 'SKIP')
+            | map(attribute='check')
+            | map('regex_replace', '^', _hr_row.name ~ ' :: ') | list)
+         + ([] if _hr_row.reachable
+            else [_hr_row.name ~ ' :: host -- ' ~ (_hr_row.reason | default(''))]) }}
+    host_rows_failed: >-
+      {{ host_rows_failed
+         + (_hr_row.checks | selectattr('status', 'eq', 'FAIL')
+            | map(attribute='check')
+            | map('regex_replace', '^', _hr_row.name ~ ' :: ') | list) }}
+  loop: "{{ host_rows }}"
+  loop_control:
+    loop_var: _hr_row
+    label: "{{ _hr_row.name }}"
+
+- name: Count check outcomes across the fleet
+  ansible.builtin.set_fact:
+    host_row_counts:
+      PASS: "{{ _hr_all | selectattr('status', 'eq', 'PASS') | list | length }}"
+      FAIL: "{{ _hr_all | selectattr('status', 'eq', 'FAIL') | list | length }}"
+      # An uncollected host contributes a SKIP even though it produced no
+      # checks. Counting only the checks that exist would let a host nobody
+      # reached vanish from the totals entirely -- entry 2 again, one level
+      # up from the row list.
+      SKIP: >-
+        {{ (_hr_all | selectattr('status', 'eq', 'SKIP') | list | length)
+           + (host_rows | rejectattr('reachable') | list | length) }}
+  vars:
+    _hr_all: "{{ host_rows | map(attribute='checks') | flatten }}"

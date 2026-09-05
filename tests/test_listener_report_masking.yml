@@ -64,7 +64,7 @@
   tasks:
     - name: Build fixture rows for the report template
       ansible.builtin.set_fact:
-        lx_rows:
+        host_rows:
           - name: db-01.site.example
             reachable: true
             verdict: FAIL
@@ -85,7 +85,7 @@
             verdict: SKIP
             checks: []
             reason: no session established, nothing collected
-        lx_counts:
+        host_row_counts:
           PASS: 0
           FAIL: 2
           SKIP: 1

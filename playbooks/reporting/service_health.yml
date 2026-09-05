@@ -130,7 +130,7 @@
       # already in sh_facts. That is what lets the same file run against
       # fixtures in tests/test_service_health_logic.yml.
       ansible.builtin.include_tasks: tasks/evaluate_service_health.yml
-      when: not (sh_collection_failed | default(false))
+      when: not (collection_failed | default(false))
 
 - name: Report on service and certificate health
   hosts: linux_hosts
@@ -153,10 +153,6 @@
     _sh_masked_path: "{{ health_report_dir }}/{{ health_report_name }}.txt"
     _sh_full_path: "{{ health_report_dir }}/{{ health_report_name }}-full.txt"
 
-    # ansible_play_hosts_all is resolved with ignore_restrictions, so it still
-    # holds hosts that went unreachable during collection. That is the only
-    # reason a dead host can appear in this report at all.
-    _sh_hosts_all: "{{ ansible_play_hosts_all }}"
 
   tasks:
     - name: Guard against an empty play
@@ -164,21 +160,28 @@
       delegate_to: localhost
       ansible.builtin.assert:
         that:
-          - _sh_hosts_all | length > 0
+          - ansible_play_hosts_all | length > 0
         fail_msg: >-
           The play matched zero hosts. Check that the inventory group
           'linux_hosts' exists and is populated. An empty run is not a passing
           run. See docs/gotchas.md entry 8.
-        success_msg: "{{ _sh_hosts_all | length }} host(s) in scope."
+        success_msg: "{{ ansible_play_hosts_all | length }} host(s) in scope."
 
     - name: Build the report rows
       # apply:, not bare run_once/delegate_to -- those are not valid
       # attributes of a TaskInclude and are rejected at syntax-check.
-      ansible.builtin.include_tasks:
-        file: tasks/build_health_rows.yml
+      # include_role, not include_tasks against a ../ path. The role is
+      # shared between playbooks/reporting/ and playbooks/linux/, and a task
+      # file reached by relative path breaks the moment a directory moves.
+      # Resolution requires roles_path from ansible.cfg -- same shape as
+      # docs/gotchas.md entry 18.
+      ansible.builtin.include_role:
+        name: host_rows
         apply:
           run_once: true
           delegate_to: localhost
+      vars:
+        host_rows_targeted: "{{ ansible_play_hosts_all }}"
       run_once: true
 
     - name: Ensure the report directory exists
@@ -263,7 +266,7 @@
           {{ _sh_counts.PASS }} healthy
         body: "{{ lookup('ansible.builtin.file', _sh_masked_path) }}"
       vars:
-        _sh_counts: "{{ health_verdict_counts }}"
+        _sh_counts: "{{ host_row_counts }}"
       # Bound to the toggle, not hardcoded. A hardcoded no_log censors the
       # error text too, which makes a relay authentication failure
       # undebuggable. Paired with ignore_errors and the assert below so the
@@ -293,12 +296,12 @@
       delegate_to: localhost
       ansible.builtin.debug:
         msg:
-          - "Hosts in scope:  {{ health_rows | length }}"
-          - "Collected:       {{ health_rows | selectattr('reachable') | list | length }}"
-          - "Not collected:   {{ health_rows | rejectattr('reachable') | list | length }}"
-          - "Checks PASS:     {{ health_verdict_counts.PASS }}"
-          - "Checks FAIL:     {{ health_verdict_counts.FAIL }}"
-          - "Checks SKIP:     {{ health_verdict_counts.SKIP }}  (unevaluated, not healthy)"
+          - "Hosts in scope:  {{ host_rows | length }}"
+          - "Collected:       {{ host_rows | selectattr('reachable') | list | length }}"
+          - "Not collected:   {{ host_rows | rejectattr('reachable') | list | length }}"
+          - "Checks PASS:     {{ host_row_counts.PASS }}"
+          - "Checks FAIL:     {{ host_row_counts.FAIL }}"
+          - "Checks SKIP:     {{ host_row_counts.SKIP }}  (unevaluated, not healthy)"
           - "Distribution:    {{ _sh_masked_path }} (0640, masked)"
           - "Archive:         {{ _sh_full_path }} (0600, full)"
 
@@ -313,11 +316,11 @@
       # a pass, so treating it as one is exactly the mistake in entry 16.
       ansible.builtin.assert:
         that:
-          - health_verdict_counts.SKIP | int == 0
+          - host_row_counts.SKIP | int == 0
         fail_msg: >-
-          {{ health_verdict_counts.SKIP }} check(s) could not be evaluated and
+          {{ host_row_counts.SKIP }} check(s) could not be evaluated and
           were NOT counted as healthy:
-          {{ health_skipped_summary | join('; ') }}
+          {{ host_rows_skipped | join('; ') }}
         success_msg: "Every check produced a verdict."
       when: health_fail_on_skip | bool
 
@@ -326,9 +329,9 @@
       delegate_to: localhost
       ansible.builtin.assert:
         that:
-          - health_verdict_counts.FAIL | int == 0
+          - host_row_counts.FAIL | int == 0
         fail_msg: >-
-          {{ health_verdict_counts.FAIL }} check(s) failed:
-          {{ health_failed_summary | join('; ') }}
+          {{ host_row_counts.FAIL }} check(s) failed:
+          {{ host_rows_failed | join('; ') }}
         success_msg: "Every evaluated check passed."
       when: health_fail_on_fail | bool
