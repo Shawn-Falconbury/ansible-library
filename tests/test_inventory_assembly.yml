@@ -1,0 +1,188 @@
+---
+# ===========================================================================
+# test_inventory_assembly.yml
+#
+# Drive playbooks/network/tasks/build_inventory_rows.yml against fixture
+# hosts and assert that hosts which produced no data still produce a row.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS CATCHES THAT THE OTHER TESTS DO NOT
+# ---------------------------------------------------------------------------
+# test_report_masking.yml proves the template masks whatever rows it is
+# handed. It says nothing about which rows get built, and it is fed a fixture
+# list that already contains an unreachable device -- so it cannot detect the
+# failure where an unreachable device never becomes a row at all.
+#
+# That failure is the expensive one. A dropped host does not render as an
+# error; it renders as a smaller fleet, in a report that is otherwise correct
+# and well formatted. See docs/gotchas.md entries 2 and 3.
+#
+# Reproducing it against hardware needs a device that is down on demand.
+# Here it is reproduced by targeting hosts that never had facts set, which is
+# exactly the state a host is left in after going unreachable.
+#
+# ---------------------------------------------------------------------------
+# MAKE IT FAIL FIRST
+# ---------------------------------------------------------------------------
+# Every assertion below is written to fail if row assembly reverts to
+# iterating over surviving hosts, or starts defaulting absent metrics to
+# zero. Both were checked by making them fail before this file was committed.
+#
+# ---------------------------------------------------------------------------
+# RUNNING
+# ---------------------------------------------------------------------------
+#   ansible-playbook -i localhost, tests/test_inventory_assembly.yml
+#
+# Explicit inventory on purpose. Running against the project inventory risks
+# picking up group_vars that set ansible_connection, which outranks the
+# play-level connection keyword and would dispatch these tasks at a device.
+# See docs/gotchas.md entry 4.
+# ===========================================================================
+
+- name: Inventory row assembly
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    # Three hosts. Only the first has facts, which is the shape left behind
+    # when two devices go unreachable during collection: they are gone from
+    # ansible_play_hosts but still present in ansible_play_hosts_all.
+    _di_hosts_all:
+      - collected-01.site.example
+      - vanished-01.site.example
+      - failed-collection-01.site.example
+
+    _fixture_facts:
+      model: WS-C2960X-48FPS-L
+      version: 15.2(7)E7
+      mgmt_ip: 192.0.2.11
+      mac: 00:00:5e:00:53:a1
+      interfaces:
+        - name: GigabitEthernet0/1
+          status: up
+          ip: 198.51.100.11
+
+  tasks:
+    - name: Register the fixture hosts
+      # add_host rather than a static inventory file so the fixture lives
+      # with the test. hostvars for these is what build_inventory_rows.yml
+      # reads.
+      ansible.builtin.add_host:
+        name: "{{ item.name }}"
+        groups: _di_fixture
+        di_facts: "{{ item.di_facts | default(omit) }}"
+        di_collection_failed: "{{ item.di_collection_failed | default(omit) }}"
+        di_collection_error: "{{ item.di_collection_error | default(omit) }}"
+      loop:
+        # Answered and collected.
+        - name: collected-01.site.example
+          di_facts: "{{ _fixture_facts }}"
+
+        # Went unreachable. No di_facts at all -- this is the state Ansible
+        # leaves a host in, not something the collector sets.
+        - name: vanished-01.site.example
+
+        # Answered, but collection failed. Different condition from the
+        # above, same row: nothing was measured either way.
+        - name: failed-collection-01.site.example
+          di_collection_failed: true
+          di_collection_error: snmpget exited 1
+      changed_when: false
+
+    - name: Build the rows
+      ansible.builtin.include_tasks: ../playbooks/network/tasks/build_inventory_rows.yml
+
+    - name: Every targeted host produced a row
+      # The central assertion. If assembly ever iterates ansible_play_hosts
+      # instead of _di_hosts_all, this drops to 1 and fails here rather than
+      # in a report somebody trusts.
+      ansible.builtin.assert:
+        that:
+          - inventory_rows | length == 3
+          - (inventory_rows | map(attribute='name') | list | sort) == (_di_hosts_all | sort)
+        fail_msg: >-
+          Expected one row per targeted host. Got
+          {{ inventory_rows | length }}:
+          {{ inventory_rows | map(attribute='name') | join(', ') }}
+        success_msg: "3 rows for 3 targeted hosts."
+
+    - name: The collected host kept its values
+      ansible.builtin.assert:
+        that:
+          - _row.reachable
+          - _row.model == 'WS-C2960X-48FPS-L'
+          - _row.version == '15.2(7)E7'
+          - _row.mgmt_ip == '192.0.2.11'
+          - _row.mac == '00:00:5e:00:53:a1'
+          - _row.interfaces | length == 1
+          - _row.interfaces[0].name == 'GigabitEthernet0/1'
+        fail_msg: "Collected host lost or altered its facts: {{ _row }}"
+        success_msg: "Collected host round-tripped intact."
+      vars:
+        _row: >-
+          {{ inventory_rows | selectattr('name', 'eq', 'collected-01.site.example')
+             | first }}
+
+    - name: Hosts with no data are marked unreachable
+      ansible.builtin.assert:
+        that:
+          - not _vanished.reachable
+          - not _failed.reachable
+        fail_msg: >-
+          A host with no di_facts was marked reachable. Every downstream
+          field will render as a measurement.
+        success_msg: "Both uncollected hosts are flagged."
+      vars:
+        _vanished: >-
+          {{ inventory_rows | selectattr('name', 'eq', 'vanished-01.site.example') | first }}
+        _failed: >-
+          {{ inventory_rows | selectattr('name', 'eq', 'failed-collection-01.site.example') | first }}
+
+    - name: Uncollected rows carry absence, never a zero
+      # docs/gotchas.md entry 3, asserted directly. A '0' or 'unknown' here
+      # renders as a measurement and reads as the healthiest device in the
+      # fleet. Empty strings render as an em dash.
+      ansible.builtin.assert:
+        that:
+          - _row.model == ''
+          - _row.version == ''
+          - _row.mgmt_ip == ''
+          - _row.mac == ''
+          - _row.interfaces == []
+          - _row.model != 0
+          - "'unknown' not in [_row.model, _row.version, _row.mgmt_ip, _row.mac]"
+        fail_msg: >-
+          An uncollected host was given a placeholder value instead of an
+          absence: {{ _row }}
+        success_msg: "Uncollected rows carry empty fields, not defaults."
+      loop:
+        - vanished-01.site.example
+        - failed-collection-01.site.example
+      loop_control:
+        loop_var: _name
+        label: "{{ _name }}"
+      vars:
+        _row: "{{ inventory_rows | selectattr('name', 'eq', _name) | first }}"
+
+    - name: Uncollected hosts are reported with a reason
+      # Counting them is not enough. "2 not collected" and "2 not collected,
+      # one refused the credential" lead to different next actions.
+      ansible.builtin.assert:
+        that:
+          - inventory_uncollected | length == 2
+          - _reasons['failed-collection-01.site.example'] == 'snmpget exited 1'
+          - _reasons['vanished-01.site.example'] | length > 0
+        fail_msg: "Reasons missing or wrong: {{ inventory_uncollected }}"
+        success_msg: "Both uncollected hosts carry a reason."
+      vars:
+        _reasons: >-
+          {{ dict(inventory_uncollected | map(attribute='name') | list
+                  | zip(inventory_uncollected | map(attribute='reason') | list)) }}
+
+    - name: Report suite outcome
+      ansible.builtin.debug:
+        msg:
+          - "rows:        {{ inventory_rows | length }}"
+          - "collected:   {{ inventory_rows | selectattr('reachable') | list | length }}"
+          - "uncollected: {{ inventory_uncollected | length }}"

@@ -64,6 +64,13 @@ echo "== baseline evaluation logic (fixture-driven) =================="
 ansible-playbook -i localhost, tests/test_baseline_logic.yml || FAILED=1
 
 echo
+echo "== inventory row assembly (fixture-driven) ====================="
+# Asserts that a host which produced no facts still produces a row. The
+# masking test cannot catch this: it is handed a fixture list that already
+# contains an unreachable device, so it never sees a dropped one.
+ansible-playbook -i localhost, tests/test_inventory_assembly.yml || FAILED=1
+
+echo
 if [ ${FAILED} -ne 0 ]; then
     echo "TEST SUITE FAILED"
     exit 1

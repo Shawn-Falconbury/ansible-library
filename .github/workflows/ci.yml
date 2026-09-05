@@ -112,6 +112,9 @@ jobs:
         # TimeTicks guard testable in CI at all.
         run: ansible-playbook -i localhost, tests/test_baseline_logic.yml
 
+      - name: Inventory row assembly test
+        run: ansible-playbook -i localhost, tests/test_inventory_assembly.yml
+
       - name: Report masking test
         # Config is already staged by the step above, so the playbook can
         # be invoked directly rather than through tests/test_masking.sh.

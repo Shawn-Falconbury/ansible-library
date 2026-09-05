@@ -83,9 +83,16 @@
     bc_facts:
       name: "{{ inventory_hostname }}"
       model: "{{ _bc_lines[0] | default('') | regex_search('(WS-C[\\w-]+|C9[0-9]{3}[\\w-]*)') | default('', true) }}"
+      # regex_search returns None when it does not match, and `None | first`
+      # RAISES. The trailing `| default('')` reads as a guard but never runs,
+      # because first throws before default is reached. A device whose
+      # sysDescr omits the word "Version" aborted collection here with an
+      # AttributeError about is_async, which points nowhere near the cause.
+      # Matching the whole token and trimming keeps the value a string on
+      # both paths, so default() actually applies.
       version: >-
-        {{ _bc_lines[0] | default('')
-           | regex_search('Version ([^,\\s]+)', '\\1') | first | default('') }}
+        {{ (_bc_lines[0] | default('') | regex_search('Version [^,\\s]+')
+            | default('', true)) | regex_replace('^Version\\s+', '') }}
       # SNMP does not return the running configuration. The config checks will
       # SKIP on this transport, which is correct and stated in the report.
       running_config: []

@@ -1,0 +1,121 @@
+---
+# ===========================================================================
+# tasks/collect_inventory_ssh.yml
+#
+# Collect inventory fields over network_cli. Produces di_facts.
+#
+# Collection ONLY. No judgements, no rendering -- those live in
+# build_inventory_rows.yml and the template, which is what keeps both
+# testable without hardware.
+#
+# ---------------------------------------------------------------------------
+# THERE IS NO CHASSIS MAC IN ios_facts
+# ---------------------------------------------------------------------------
+# ios_facts returns a macaddress per interface. It does not return a chassis
+# or base MAC, and no gather_subset adds one. So `mac` is taken from the
+# interface carrying the management address, and left EMPTY when no such
+# interface can be identified.
+#
+# Empty is the point. Falling back to "the first interface that has a MAC"
+# would populate the column on every device with a value that is real,
+# plausible, and not the one the column claims to show. An em dash is
+# obviously absent; a wrong MAC gets copied into a ticket.
+#
+# ---------------------------------------------------------------------------
+# ansible_host IS NOT NECESSARILY AN ADDRESS
+# ---------------------------------------------------------------------------
+# Inventories frequently use DNS names. mask_ip RAISES on input it cannot
+# parse rather than passing it through, so handing it a hostname would abort
+# the render. That is the safe direction -- see docs/gotchas.md entry 18 --
+# but it costs the whole report over one device.
+#
+# The value is therefore validated here, at collection, and dropped if it is
+# not an address. The playbook then warns and names the affected devices, so
+# the empty column is reported rather than merely rendered.
+# ===========================================================================
+
+- name: Gather device facts over network_cli
+  # The reachability test and the collection are the same operation: this
+  # task must open a session and transact. ansible.builtin.ping would return
+  # pong for a device powered off for months, because it is resolved by an
+  # action plugin on the control node. See docs/gotchas.md entry 1.
+  cisco.ios.ios_facts:
+    gather_subset:
+      - min
+      - interfaces
+  register: _di_ssh
+  ignore_errors: true
+  ignore_unreachable: true
+
+- name: Record a collection failure without inventing data
+  # A device that did not answer must NOT receive a di_facts dict full of
+  # empty defaults. Every downstream field would evaluate against those
+  # blanks and render as a measured absence rather than an absent
+  # measurement. The flag lets row assembly mark the device uncollected
+  # instead. See docs/gotchas.md entry 3.
+  ansible.builtin.set_fact:
+    di_collection_failed: true
+    di_collection_error: "{{ _di_ssh.msg | default('ios_facts failed', true) }}"
+  when: >-
+    _di_ssh.failed | default(false) or _di_ssh.unreachable | default(false)
+
+- name: Start an empty interface list
+  ansible.builtin.set_fact:
+    _di_interfaces: []
+  when: not (_di_ssh.failed | default(false) or _di_ssh.unreachable | default(false))
+
+- name: Flatten the interface facts into report rows
+  # A loop rather than one large Jinja expression. The nested shape here --
+  # a dict of interfaces, each holding a list of address dicts -- is the kind
+  # of thing that produces a working-looking one-liner which quietly returns
+  # the wrong element. Written out, each field is visible.
+  ansible.builtin.set_fact:
+    _di_interfaces: "{{ _di_interfaces + [_di_iface_row] }}"
+  loop: "{{ (ansible_net_interfaces | default({}, true)) | dict2items }}"
+  loop_control:
+    loop_var: _di_if
+    label: "{{ _di_if.key }}"
+  vars:
+    # ipv4 arrives as a list of {address, subnet}, or absent, or None. The
+    # first address is what the column is for; a secondary address is not,
+    # and joining them would widen every row for a rare uninteresting case.
+    _di_if_ip: >-
+      {{ (_di_if.value.ipv4 | default([], true) | first | default({}, true)).address
+         | default('', true) }}
+    _di_iface_row:
+      name: "{{ _di_if.key }}"
+      status: "{{ _di_if.value.operstatus | default('', true) }}"
+      ip: "{{ _di_if_ip }}"
+  when: not (_di_ssh.failed | default(false) or _di_ssh.unreachable | default(false))
+
+- name: Assemble di_facts from the SSH collection
+  ansible.builtin.set_fact:
+    di_facts:
+      model: "{{ ansible_net_model | default('', true) }}"
+      version: "{{ ansible_net_version | default('', true) }}"
+      mgmt_ip: "{{ _di_mgmt_ip }}"
+      mac: "{{ _di_mgmt_mac }}"
+      interfaces: "{{ _di_interfaces }}"
+  vars:
+    _di_candidate: "{{ ansible_host | default('', true) }}"
+
+    # Validated, not trusted. See the header note. IPv4 by shape, IPv6 by the
+    # presence of a colon -- a DNS name contains neither.
+    _di_mgmt_ip: >-
+      {{ _di_candidate
+         if (_di_candidate is match('^[0-9]{1,3}(\.[0-9]{1,3}){3}$')
+             or ':' in _di_candidate)
+         else '' }}
+
+    # The interfaces carrying that address. Empty when the management address
+    # was dropped above, which is why the guard comes first.
+    _di_mgmt_names: >-
+      {{ _di_interfaces | selectattr('ip', 'eq', _di_mgmt_ip)
+         | map(attribute='name') | list }}
+
+    _di_mgmt_mac: >-
+      {{ ((ansible_net_interfaces | default({}, true))[_di_mgmt_names | first].macaddress
+          | default('', true))
+         if (_di_mgmt_ip != '' and _di_mgmt_names | length > 0)
+         else '' }}
+  when: not (_di_ssh.failed | default(false) or _di_ssh.unreachable | default(false))

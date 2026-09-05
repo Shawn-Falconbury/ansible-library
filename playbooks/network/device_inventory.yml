@@ -1,0 +1,336 @@
+---
+# ===========================================================================
+# device_inventory.yml
+#
+# Build a device inventory over SSH or SNMPv3 and render it to HTML, twice:
+# a masked copy for distribution and a full copy archived at mode 0600.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS PLAYBOOK EXISTS
+# ---------------------------------------------------------------------------
+# An inventory report is a document. It looks the same whether or not it is
+# correct, which puts it in the same hazard class as the reporting playbooks:
+# nothing about a well-formatted table suggests that three of the devices it
+# should describe are missing from it.
+#
+# Two failure modes dominate, and neither announces itself.
+#
+# The first is that unreachable hosts are removed from the play before the
+# reporting tasks run. A report built by looping over the hosts that survived
+# cannot see the ones that did not, and their absence reads as a smaller
+# fleet rather than as an outage. The row list here is therefore built from
+# ansible_play_hosts_all -- every host the play targeted -- and not from
+# whatever is still standing at reporting time. See docs/gotchas.md entry 2.
+#
+# The second is that a dead device has no facts, and filling them with
+# defaults produces a row that renders as a measurement. A device reported
+# with an empty model and a blank version at least reads as absent; the same
+# device reported with `uptime 0` reads as healthy. Rows for hosts that did
+# not answer carry reachable: false and NO metric fields at all, and the
+# template omits the columns rather than defaulting them. See entry 3.
+#
+# ---------------------------------------------------------------------------
+# WHY ONE PLAYBOOK AND NOT TWO
+# ---------------------------------------------------------------------------
+# An earlier plan for this repository listed device_inventory.yml and
+# device_inventory_snmp.yml as separate playbooks. They are not separate.
+# Collection differs by transport; row assembly, masking, rendering, and the
+# leak gate are identical. Two playbooks would duplicate all of that, and the
+# copies would drift -- with the drift landing in the masking path, where it
+# is least visible and most expensive.
+#
+# So this follows baseline_compliance.yml: one playbook, one
+# inventory_transport variable, and a collector task file per transport. The
+# transports are NOT equivalent and the difference is stated in the report.
+# See the coverage table below.
+#
+# ---------------------------------------------------------------------------
+# REQUIRED CONFIGURATION
+# ---------------------------------------------------------------------------
+# Inventory groups
+#   ios_devices    Cisco IOS / IOS-XE devices reached via network_cli.
+#                  Must set ansible_network_os and ansible_connection.
+#
+# Group variables (see inventory/group_vars/ios_devices.yml.example)
+#   ansible_network_os        cisco.ios.ios
+#   ansible_connection        network_cli
+#   ansible_user              account used to log in
+#   ansible_password          reference a vaulted variable, never a literal
+#
+# Additionally, for inventory_transport=snmp (see vars/*.yml.example)
+#   vault_snmp_v3_user
+#   vault_snmp_v3_auth_key
+#   vault_snmp_v3_priv_key
+#
+# ---------------------------------------------------------------------------
+# OPTIONAL VARIABLES
+# ---------------------------------------------------------------------------
+#   inventory_transport         ssh | snmp                Default: ssh
+#   inventory_report_dir        Output directory.
+#                               Default: ./reports
+#   inventory_report_name       Basename for both renders.
+#                               Default: device_inventory
+#   inventory_fail_on_down      Exit non-zero if any device was not
+#                               collected. Default: false -- an inventory is
+#                               usually wanted even when partial, unlike a
+#                               compliance run. The count is always reported.
+#   mask_sensitive_output       Bind no_log on credential-bearing tasks.
+#                               Default: true. Set false to debug SNMPv3.
+#   snmp_conf_path              SNMPCONFPATH for the net-snmp tools.
+#                               Default: /etc/ansible-reference/snmp
+#
+# ---------------------------------------------------------------------------
+# TRANSPORT COVERAGE -- THE TWO ARE NOT INTERCHANGEABLE
+# ---------------------------------------------------------------------------
+#   field            ssh    snmp
+#   model            yes    yes    (parsed from sysDescr)
+#   version          yes    yes    (parsed from sysDescr)
+#   mgmt_ip          yes    yes
+#   mac              yes    yes
+#   interface name   yes    yes
+#   interface status yes    yes
+#   interface ip     yes    OMITTED
+#
+# SNMP omits per-interface addresses. Correlating ipAddrTable back to
+# ifIndex is a second walk and a join, and a partial or mis-joined result
+# would render as an address next to the wrong interface -- a wrong value,
+# not a missing one. An omitted field renders as an em dash and is obviously
+# absent. Do not "fix" this by defaulting it.
+#
+# Diff the two reports before any transport cutover. A field that became an
+# em dash is easy to miss if you only look at the device count.
+#
+# ---------------------------------------------------------------------------
+# ASSUMPTIONS
+# ---------------------------------------------------------------------------
+#   * ansible.cfg is staged, so filter_plugins resolves and the masking
+#     filters are available to the template. Ansible discovers
+#     filter_plugins/ next to the PLAYBOOK, and this playbook is two
+#     directories down, so the ansible.cfg declaration is what makes it work.
+#     See docs/gotchas.md entry 18.
+#   * The control node can reach the devices. This playbook records what did
+#     not answer; it does not diagnose why.
+#
+# ---------------------------------------------------------------------------
+# WHAT FAILS IF MISCONFIGURED
+# ---------------------------------------------------------------------------
+#   ansible.cfg not staged           TemplateAssertionError: No filter named
+#                                    'mask_ip'. The error points at the
+#                                    template, which is the wrong place to
+#                                    look -- it is a search-path problem.
+#   ansible_network_os unset         ios_facts fails with a connection-plugin
+#                                    message that resembles a timeout. Every
+#                                    device is reported uncollected.
+#   Group named incorrectly          Zero hosts, an empty but well-formed
+#                                    report, exit 0. The assert in the report
+#                                    play guards this.
+#   inventory_transport misspelled   Fails immediately with the accepted
+#                                    values named, rather than silently
+#                                    collecting nothing.
+#   ansible_host is a DNS name       mask_ip raises on input it cannot parse,
+#                                    so it is NOT passed through. Collection
+#                                    leaves mgmt_ip empty and the run warns,
+#                                    naming the devices. An em dash in that
+#                                    column with a warning is correct; a
+#                                    hostname rendered into a column labelled
+#                                    "management address" is not.
+#
+# ---------------------------------------------------------------------------
+# USAGE
+# ---------------------------------------------------------------------------
+#   ansible-playbook playbooks/network/device_inventory.yml
+#   ansible-playbook playbooks/network/device_inventory.yml \
+#       -e inventory_transport=snmp
+#   ansible-playbook playbooks/network/device_inventory.yml \
+#       -e inventory_fail_on_down=true --limit ios_devices
+# ===========================================================================
+
+- name: Collect device inventory
+  hosts: ios_devices
+  gather_facts: false
+  # No connection: keyword. ansible_connection lives in group_vars and
+  # outranks a play-level value silently. See docs/gotchas.md entry 4.
+
+  vars:
+    inventory_transport: "{{ inventory_transport | default('ssh') }}"
+
+  tasks:
+    - name: Reject an unknown transport before collecting anything
+      # Named values, checked once, at the top. A misspelling that falls
+      # through to "collect nothing" would produce an empty report and a
+      # zero exit -- the failure this whole repository is about.
+      ansible.builtin.assert:
+        that:
+          - inventory_transport in ['ssh', 'snmp']
+        fail_msg: >-
+          inventory_transport must be 'ssh' or 'snmp', got
+          '{{ inventory_transport }}'.
+        success_msg: "Collecting over {{ inventory_transport }}."
+      run_once: true
+      delegate_to: localhost
+
+    - name: Collect over the selected transport
+      # Collection only. This file makes no judgements and renders nothing;
+      # that split is what lets tests/test_inventory_assembly.yml exercise
+      # the row logic with no devices present.
+      ansible.builtin.include_tasks: "tasks/collect_inventory_{{ inventory_transport }}.yml"
+
+- name: Render the device inventory
+  hosts: ios_devices
+  gather_facts: false
+  # Declared, not inherited. run_once selects one host and depends on
+  # ordering that the free strategy does not guarantee.
+  strategy: linear
+  # run_once and delegate_to are TASK keywords. On a play they parse as valid
+  # YAML and fail at run time. See docs/gotchas.md entry 15.
+
+  vars:
+    inventory_transport: "{{ inventory_transport | default('ssh') }}"
+    inventory_report_dir: "{{ inventory_report_dir | default('./reports') }}"
+    inventory_report_name: "{{ inventory_report_name | default('device_inventory') }}"
+    inventory_fail_on_down: "{{ inventory_fail_on_down | default(false) }}"
+
+    _di_masked_path: "{{ inventory_report_dir }}/{{ inventory_report_name }}.html"
+    _di_full_path: "{{ inventory_report_dir }}/{{ inventory_report_name }}-full.html"
+
+    # ansible_play_hosts_all is resolved with ignore_restrictions, so it still
+    # contains hosts that went unreachable in the collection play. That is the
+    # entire reason a dead device can appear in this report at all.
+    _di_hosts_all: "{{ ansible_play_hosts_all }}"
+
+  tasks:
+    - name: Guard against an empty play
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.assert:
+        that:
+          - _di_hosts_all | length > 0
+        fail_msg: >-
+          The play matched zero hosts. Check that the inventory group
+          'ios_devices' exists and is populated. An empty run is not a
+          passing run. See docs/gotchas.md entry 8.
+        success_msg: "{{ _di_hosts_all | length }} device(s) in scope."
+
+    - name: Build the row list
+      # apply:, not bare run_once/delegate_to. Those are not valid attributes
+      # of a TaskInclude -- they have to be handed to the included tasks
+      # rather than to the include itself. Same family as docs/gotchas.md
+      # entry 15, but this one is caught by --syntax-check rather than at
+      # run time, which is why CI syntax-checks every playbook.
+      ansible.builtin.include_tasks:
+        file: tasks/build_inventory_rows.yml
+        apply:
+          run_once: true
+          delegate_to: localhost
+      run_once: true
+
+    - name: Ensure the report directory exists
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.file:
+        path: "{{ inventory_report_dir }}"
+        state: directory
+        mode: "0750"
+
+    - name: Render the archive copy
+      run_once: true
+      delegate_to: localhost
+      # Written first and at 0600. If the masked render below fails, the
+      # unmasked data still exists on the control node rather than the run
+      # producing nothing at all.
+      ansible.builtin.template:
+        # Bare filename. Ansible searches templates/ beside the playbook, so
+        # this stays correct if the directory moves. A ../../ path does not.
+        src: device_inventory.html.j2
+        dest: "{{ _di_full_path }}"
+        mode: "0600"
+      vars:
+        report_mask: false
+        report_generated: "{{ '%Y-%m-%d %H:%M:%S' | strftime }}"
+
+    - name: Render the distribution copy
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.template:
+        src: device_inventory.html.j2
+        dest: "{{ _di_masked_path }}"
+        mode: "0640"
+      vars:
+        report_mask: true
+        report_generated: "{{ '%Y-%m-%d %H:%M:%S' | strftime }}"
+
+    - name: Scan the distribution copy for unmasked environment data
+      run_once: true
+      delegate_to: localhost
+      # The masking filters and the leak checker are independent
+      # implementations of the same rule. Running the checker over the render
+      # is what makes them agree in practice rather than in principle: if the
+      # template grows a field that bypasses the addr() macro, the filters
+      # stay green and this catches it.
+      #
+      # changed_when: false because a scan changes nothing. failed_when is
+      # explicit so the message below can name what to do about it.
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../../scripts/leak_check.py"
+          - "{{ _di_masked_path }}"
+      register: _di_leak_scan
+      changed_when: false
+      failed_when: false
+
+    - name: Refuse to distribute a report that failed the scan
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.assert:
+        that:
+          - _di_leak_scan.rc == 0
+        fail_msg: >-
+          The masked report at {{ _di_masked_path }} contains data the leak
+          checker rejected. It has NOT been deleted -- inspect it, and treat
+          it as unmasked until you know why. Scanner output:
+          {{ _di_leak_scan.stderr | default(_di_leak_scan.stdout) | trim }}
+        success_msg: "Masked report passed the leak scan."
+
+    - name: Warn about devices whose management address could not be rendered
+      run_once: true
+      delegate_to: localhost
+      # Silence here would be a quiet downgrade: the column renders as an em
+      # dash and looks like a device that simply has no address.
+      ansible.builtin.debug:
+        msg:
+          - "These devices are reachable but their ansible_host is not an IP"
+          - "address, so mgmt_ip was left empty rather than routed through"
+          - "mask_ip, which raises on input it cannot parse:"
+          - "  {{ _di_no_addr | join(', ') }}"
+      vars:
+        _di_no_addr: >-
+          {{ inventory_rows | selectattr('reachable')
+             | selectattr('mgmt_ip', 'eq', '') | map(attribute='name') | list }}
+      when: _di_no_addr | length > 0
+
+    - name: Summarise to stdout
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.debug:
+        msg:
+          - "Transport:    {{ inventory_transport }}"
+          - "In scope:     {{ inventory_rows | length }}"
+          - "Collected:    {{ inventory_rows | selectattr('reachable') | list | length }}"
+          - "Not collected: {{ inventory_rows | rejectattr('reachable') | list | length }}"
+          - "Distribution: {{ _di_masked_path }} (0640, masked)"
+          - "Archive:      {{ _di_full_path }} (0600, full)"
+
+    - name: Fail if any device was not collected
+      run_once: true
+      delegate_to: localhost
+      # Last, so both reports exist even when the run is going to fail. A run
+      # that fails before writing its artefact is much harder to triage.
+      ansible.builtin.assert:
+        that:
+          - inventory_rows | rejectattr('reachable') | list | length == 0
+        fail_msg: >-
+          Not collected:
+          {{ inventory_rows | rejectattr('reachable') | map(attribute='name') | join(', ') }}
+        success_msg: "Every device in scope was collected."
+      when: inventory_fail_on_down | bool

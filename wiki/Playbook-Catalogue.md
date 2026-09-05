@@ -17,12 +17,32 @@ Over `network_cli` and SNMPv3.
 |---|---|---|
 | `reachability_check.yml` | ✅ complete | Verify devices are *genuinely* reachable. Splits by host class because `ansible.builtin.ping` does not test a `network_cli` device. |
 | `baseline_compliance.yml` | ✅ complete | Audit IOS version and configuration against `vars/baseline.yml`. Selectable SSH or SNMPv3 transport. Collection and evaluation are separate task files so the logic is testable without hardware. |
-| `device_inventory.yml` | 🔜 planned | Device inventory over SSH, rendered to HTML. |
-| `device_inventory_snmp.yml` | 🔜 planned | SNMPv3 counterpart to the above. |
+| `device_inventory.yml` | ✅ complete | Device inventory over SSH **or** SNMPv3, dual-rendered to HTML: masked for distribution at 0640, full and archived at 0600. Row assembly lives in its own task file so the unreachable-host path is testable with no devices present. |
 | `snmp_capability_probe.yml` | 🔜 planned | Modular probe matrix establishing which OIDs a platform family actually answers, with per-family fallback where a probe is unsupported. |
 | `host_key_trust.yml` | 🔜 planned | Declarative management of the SSH known-hosts trust store, with git as the authoritative anchor. |
 
 **Reading order:** start with `reachability_check.yml`.
+
+### `device_inventory.yml` transport coverage
+
+Same warning as below, different playbook. Everything is collected on both
+transports except one field:
+
+| Field | SSH | SNMPv3 |
+|---|:---:|:---:|
+| model, version, mgmt_ip, mac | ✅ | ✅ |
+| interface name, status | ✅ | ✅ |
+| interface IP address | ✅ | ➖ omitted |
+
+SNMP omits per-interface addresses deliberately. Collecting them means
+walking `ipAdEntIfIndex` and joining it back to `ifIndex`, and a partial or
+mis-ordered join renders an address beside the *wrong* interface. That is a
+wrong value rather than a missing one, and wrong values in a report get
+believed. An omitted field renders as an em dash and is obviously absent.
+
+Do not close the gap by defaulting the field —
+[Gotcha 03](Gotcha-03-unreachable-hosts-have-no-facts-do-not-default-them-to-zero)
+is the same mistake one level down.
 
 ### Transport coverage is not symmetric
 

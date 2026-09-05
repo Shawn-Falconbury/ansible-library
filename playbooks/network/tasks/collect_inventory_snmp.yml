@@ -1,0 +1,234 @@
+---
+# ===========================================================================
+# tasks/collect_inventory_snmp.yml
+#
+# Collect inventory fields over SNMPv3 using the net-snmp CLI tools.
+# Produces di_facts.
+#
+# WHY CLI TOOLS RATHER THAN A MODULE
+# Same reason as tasks/collect_snmp.yml: community.general.snmp_facts has no
+# ENTITY-MIB support, and the CLI tools cover the full OID space and are
+# already present on most control nodes.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS TRANSPORT CANNOT DO
+# ---------------------------------------------------------------------------
+# Per-interface IP addresses are NOT collected. Getting them means walking
+# ipAdEntIfIndex and joining it back to ifIndex, and a partial or mis-ordered
+# join renders an address beside the wrong interface. That is a WRONG value,
+# not a missing one, and wrong values in a report get believed.
+#
+# So `ip` is left empty on every interface here and renders as an em dash.
+# The playbook header states this in the coverage table. Do not close the gap
+# by defaulting the field -- see docs/gotchas.md entry 3 for why a filled-in
+# blank is worse than an obvious hole.
+#
+# ---------------------------------------------------------------------------
+# -Ovqt IS LOAD-BEARING
+# ---------------------------------------------------------------------------
+#   -O v  value only, no OID prefix
+#   -O q  quick, no type annotation
+#   -O t  TimeTicks as a RAW INTEGER
+#
+# Without -t, net-snmp renders TimeTicks for humans as "9:0:07:42.73", and
+# `| int` on that returns 0 with no error. Nothing in this file compares
+# TimeTicks, but the flags are kept identical to collect_snmp.yml so the two
+# collectors cannot diverge in a way that matters later.
+# See docs/gotchas.md entry 6.
+#
+# ---------------------------------------------------------------------------
+# CREDENTIAL HANDLING
+# ---------------------------------------------------------------------------
+# SNMPv3 credentials are command arguments and would otherwise land in logs.
+# no_log is bound to mask_sensitive_output rather than hardcoded: hardcoding
+# it censors the error text too, which makes an authentication failure
+# undebuggable. Run with -e mask_sensitive_output=false while developing.
+# See docs/gotchas.md entry 9.
+#
+# SNMPCONFPATH is set explicitly. A service account whose $HOME resolves into
+# a git working tree would otherwise write ~/.snmp/snmp.conf under version
+# control. See docs/gotchas.md entry 10.
+# ===========================================================================
+
+- name: Read system identity over SNMPv3
+  ansible.builtin.command:
+    argv:
+      - snmpget
+      - "-v3"
+      - "-l"
+      - "authPriv"
+      - "-u"
+      - "{{ vault_snmp_v3_user }}"
+      - "-a"
+      - "{{ snmp_auth_protocol | default('SHA') }}"
+      - "-A"
+      - "{{ vault_snmp_v3_auth_key }}"
+      - "-x"
+      - "{{ snmp_priv_protocol | default('AES') }}"
+      - "-X"
+      - "{{ vault_snmp_v3_priv_key }}"
+      - "-Ovqt"
+      - "-t"
+      - "{{ snmp_timeout | default(5) }}"
+      - "-r"
+      - "{{ snmp_retries | default(2) }}"
+      - "{{ ansible_host | default(inventory_hostname) }}"
+      - "1.3.6.1.2.1.1.1.0"   # sysDescr
+  environment:
+    SNMPCONFPATH: "{{ snmp_conf_path | default('/etc/ansible-reference/snmp') }}"
+  delegate_to: localhost
+  register: _di_snmp_sys
+  changed_when: false
+  failed_when: false
+  no_log: "{{ mask_sensitive_output | default(true) }}"
+
+- name: Surface an SNMP failure without printing the credentials
+  # Paired with no_log above. The task itself is censored, so the failure is
+  # re-raised here where the message is built from the return code alone --
+  # enough to diagnose, nothing sensitive.
+  ansible.builtin.set_fact:
+    di_collection_failed: true
+    di_collection_error: >-
+      snmpget exited {{ _di_snmp_sys.rc }}. Check SNMPv3 credentials, the
+      authPriv protocol pair, and reachability on UDP/161. Re-run with
+      -e mask_sensitive_output=false to see the underlying error.
+  when: _di_snmp_sys.rc != 0
+
+- name: Walk the interface table
+  # ifDescr and ifOperStatus, walked separately and joined by ifIndex below.
+  # Two walks of the same table return the same index set on any device that
+  # is not reconfiguring mid-run; the join asserts that rather than assuming
+  # it.
+  ansible.builtin.command:
+    argv:
+      - snmpwalk
+      - "-v3"
+      - "-l"
+      - "authPriv"
+      - "-u"
+      - "{{ vault_snmp_v3_user }}"
+      - "-a"
+      - "{{ snmp_auth_protocol | default('SHA') }}"
+      - "-A"
+      - "{{ vault_snmp_v3_auth_key }}"
+      - "-x"
+      - "{{ snmp_priv_protocol | default('AES') }}"
+      - "-X"
+      - "{{ vault_snmp_v3_priv_key }}"
+      - "-Oqn"   # numeric OIDs, quick -- the index must stay machine-readable
+      - "-t"
+      - "{{ snmp_timeout | default(5) }}"
+      - "-r"
+      - "{{ snmp_retries | default(2) }}"
+      - "{{ ansible_host | default(inventory_hostname) }}"
+      - "{{ _di_oid }}"
+  environment:
+    SNMPCONFPATH: "{{ snmp_conf_path | default('/etc/ansible-reference/snmp') }}"
+  delegate_to: localhost
+  loop:
+    - "1.3.6.1.2.1.2.2.1.2"   # ifDescr
+    - "1.3.6.1.2.1.2.2.1.8"   # ifOperStatus
+  loop_control:
+    loop_var: _di_oid
+    label: "{{ _di_oid }}"
+  register: _di_snmp_walks
+  changed_when: false
+  failed_when: false
+  no_log: "{{ mask_sensitive_output | default(true) }}"
+  when: _di_snmp_sys.rc == 0
+
+- name: Index the two interface walks by ifIndex
+  # Each walk line is ".1.3.6.1.2.1.2.2.1.2.10101 GigabitEthernet0/1". The
+  # final OID label is ifIndex, and it is the only thing that joins descr to
+  # status. Parsed into dicts here so the join below is a lookup rather than
+  # a positional assumption -- two walks can return different row counts if
+  # an interface appears or disappears between them, and zipping by position
+  # would then pair the wrong status with the wrong interface.
+  ansible.builtin.set_fact:
+    _di_descr_map: >-
+      {{ dict(_di_descr_lines | map('regex_replace', _di_line_re, '\1|\2')
+              | map('split', '|', 1) | list) }}
+    _di_status_map: >-
+      {{ dict(_di_status_lines | map('regex_replace', _di_line_re, '\1|\2')
+              | map('split', '|', 1) | list) }}
+  vars:
+    _di_line_re: '^\S*\.([0-9]+)\s+(.*)$'
+    _di_descr_lines: >-
+      {{ (_di_snmp_walks.results[0].stdout | default('', true)).splitlines()
+         | map('trim') | select('match', _di_line_re) | list }}
+    _di_status_lines: >-
+      {{ (_di_snmp_walks.results[1].stdout | default('', true)).splitlines()
+         | map('trim') | select('match', _di_line_re) | list }}
+  when:
+    - _di_snmp_sys.rc == 0
+    - not (di_collection_failed | default(false))
+
+- name: Start an empty interface list
+  ansible.builtin.set_fact:
+    _di_interfaces: []
+  when:
+    - _di_snmp_sys.rc == 0
+    - not (di_collection_failed | default(false))
+
+- name: Join the walks into report rows
+  ansible.builtin.set_fact:
+    _di_interfaces: "{{ _di_interfaces + [_di_iface_row] }}"
+  loop: "{{ _di_descr_map | dict2items }}"
+  loop_control:
+    loop_var: _di_if
+    label: "{{ _di_if.value }}"
+  vars:
+    _di_raw_status: "{{ _di_status_map[_di_if.key] | default('', true) | trim }}"
+    # ifOperStatus is an enumeration and 1 is up. Some net-snmp builds print
+    # the label rather than the integer, so both forms map. Anything else is
+    # passed through verbatim rather than coerced to "down": testing(3) and
+    # dormant(5) are not down, and rendering them as down would be a wrong
+    # value in a column people act on.
+    _di_iface_row:
+      name: "{{ _di_if.value }}"
+      status: >-
+        {{ 'up' if _di_raw_status in ['1', 'up']
+           else ('down' if _di_raw_status in ['2', 'down'] else _di_raw_status) }}
+      # Not collected on this transport. See the header note.
+      ip: ""
+  when:
+    - _di_snmp_sys.rc == 0
+    - not (di_collection_failed | default(false))
+
+- name: Assemble di_facts from the SNMP collection
+  ansible.builtin.set_fact:
+    di_facts:
+      model: "{{ _di_model }}"
+      version: "{{ _di_version }}"
+      mgmt_ip: "{{ _di_mgmt_ip }}"
+      # ifPhysAddress is per interface, not a chassis address, so the same
+      # reasoning as the SSH collector applies: no confident base MAC means
+      # an empty field, not a plausible wrong one.
+      mac: ""
+      interfaces: "{{ _di_interfaces }}"
+  vars:
+    _di_sysdescr: "{{ _di_snmp_sys.stdout | default('', true) }}"
+
+    _di_model: >-
+      {{ _di_sysdescr | regex_search('(WS-C[\w-]+|C9[0-9]{3}[\w-]*|ISR[\w/-]+)')
+         | default('', true) }}
+    # No capture group, and no `first`. regex_search returns None when it
+    # does not match, and `None | first` RAISES -- a trailing `| default('')`
+    # cannot rescue it, because first has already thrown by the time default
+    # would run. Matching the whole token and trimming the prefix keeps the
+    # value a string on both paths, so default() actually applies.
+    _di_version: >-
+      {{ (_di_sysdescr | regex_search('Version [^,\s]+') | default('', true))
+         | regex_replace('^Version\s+', '') }}
+
+    _di_candidate: "{{ ansible_host | default('', true) }}"
+    # Validated, not trusted -- mask_ip raises on a DNS name. Same guard as
+    # the SSH collector, for the same reason.
+    _di_mgmt_ip: >-
+      {{ _di_candidate
+         if (_di_candidate is match('^[0-9]{1,3}(\.[0-9]{1,3}){3}$')
+             or ':' in _di_candidate)
+         else '' }}
+  when:
+    - _di_snmp_sys.rc == 0
+    - not (di_collection_failed | default(false))

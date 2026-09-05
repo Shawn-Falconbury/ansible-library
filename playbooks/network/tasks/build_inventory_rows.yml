@@ -1,0 +1,133 @@
+---
+# ===========================================================================
+# tasks/build_inventory_rows.yml
+#
+# Turn per-host di_facts into the inventory_rows list the HTML template
+# consumes.
+#
+# INPUT
+#   _di_hosts_all   list of hostnames the play targeted, INCLUDING any that
+#                   went unreachable during collection
+#   hostvars[h].di_facts
+#                   set by tasks/collect_inventory_*.yml on hosts that
+#                   answered; absent on hosts that did not
+#   hostvars[h].di_collection_failed
+#                   set when the host answered but collection failed anyway
+#
+# OUTPUT
+#   inventory_rows        one dict per host in _di_hosts_all, matching the
+#                         contract in templates/device_inventory.html.j2
+#   inventory_uncollected list of {name, reason} for the ones that produced
+#                         no data, so the run can say WHY and not just how
+#                         many
+#
+# ---------------------------------------------------------------------------
+# WHY THIS IS ITS OWN FILE
+# ---------------------------------------------------------------------------
+# This is the logic most capable of producing a confidently wrong report, and
+# the logic hardest to exercise against real hardware -- reproducing it needs
+# a device that is down, on demand. Split out, it runs against fixtures with
+# nothing connected. See tests/test_inventory_assembly.yml.
+#
+# ---------------------------------------------------------------------------
+# THE RULE
+# ---------------------------------------------------------------------------
+# Iterate over _di_hosts_all. Never over ansible_play_hosts, and never over
+# hostvars.
+#
+# Unreachable hosts are already gone from ansible_play_hosts by the time this
+# runs. A list built from the survivors is internally consistent, correctly
+# formatted, and missing exactly the devices somebody needed to know about.
+# Their absence does not read as an error; it reads as a smaller fleet.
+# See docs/gotchas.md entry 2.
+#
+# A host counts as reachable ONLY if it has di_facts AND did not set
+# di_collection_failed. Those are different conditions -- a device can answer
+# the transport and still fail collection -- but they produce the same row,
+# because in both cases nothing was measured.
+#
+# Rows for those hosts carry empty strings and an empty interface list. Never
+# zeros, never 'unknown', never 'n/a'. The template branches on reachable
+# before touching any metric field and omits the columns; a zero would render
+# as a measurement and read as the healthiest device in the fleet.
+# See docs/gotchas.md entry 3.
+# ===========================================================================
+
+- name: Start from an empty row list
+  # Explicit rather than relying on `| default([])` inside the accumulator.
+  # Re-running this file in one process would otherwise append to the
+  # previous pass and silently double the report.
+  ansible.builtin.set_fact:
+    inventory_rows: []
+    inventory_uncollected: []
+
+- name: Build one row per targeted host
+  ansible.builtin.set_fact:
+    inventory_rows: "{{ inventory_rows + [_di_row] }}"
+    inventory_uncollected: >-
+      {{ inventory_uncollected if _di_ok | bool
+         else inventory_uncollected + [{'name': _di_host, 'reason': _di_reason}] }}
+  loop: "{{ _di_hosts_all }}"
+  loop_control:
+    loop_var: _di_host
+    label: "{{ _di_host }}"
+  vars:
+    _di_hv: "{{ hostvars[_di_host] | default({}) }}"
+
+    # Decided once, here. Inlining this into the row expression would put the
+    # definition of "reachable" in three places inside one Jinja expression,
+    # and they would stop agreeing.
+    _di_ok: >-
+      {{ ('di_facts' in _di_hv)
+         and not (_di_hv.di_collection_failed | default(false) | bool) }}
+
+    _di_reason: >-
+      {{ _di_hv.di_collection_error
+         | default('no session established, nothing collected', true) }}
+
+    _di_facts: "{{ _di_hv.di_facts | default({}) }}"
+
+    # The two branches are written out in full rather than merged with
+    # combine(). A merge would make the unreachable row "the reachable row
+    # minus some fields", so a field added later would appear in both by
+    # default -- which is the wrong default. Written out, adding a field to
+    # one branch and forgetting the other raises at render time instead of
+    # fabricating a value in a report.
+    _di_row: >-
+      {{
+        {
+          'name': _di_host,
+          'reachable': true,
+          'model': _di_facts.model | default('', true),
+          'version': _di_facts.version | default('', true),
+          'mgmt_ip': _di_facts.mgmt_ip | default('', true),
+          'mac': _di_facts.mac | default('', true),
+          'interfaces': _di_facts.interfaces | default([], true)
+        }
+        if _di_ok | bool else
+        {
+          'name': _di_host,
+          'reachable': false,
+          'model': '',
+          'version': '',
+          'mgmt_ip': '',
+          'mac': '',
+          'interfaces': []
+        }
+      }}
+
+- name: Confirm every targeted host produced exactly one row
+  # The task above is a loop with a conditional inside it, which is precisely
+  # the shape that silently drops an element. Counting is cheap, and a short
+  # row list is otherwise indistinguishable from a small fleet.
+  ansible.builtin.assert:
+    that:
+      - inventory_rows | length == _di_hosts_all | length
+      - (inventory_rows | map(attribute='name') | list | sort) == (_di_hosts_all | list | sort)
+    fail_msg: >-
+      Row assembly dropped hosts. Targeted {{ _di_hosts_all | length }},
+      produced {{ inventory_rows | length }}. Missing:
+      {{ _di_hosts_all | difference(inventory_rows | map(attribute='name') | list) | join(', ') }}
+    success_msg: >-
+      {{ inventory_rows | length }} row(s) for
+      {{ _di_hosts_all | length }} targeted host(s).
